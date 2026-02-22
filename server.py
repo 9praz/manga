@@ -1,21 +1,3 @@
-"""
-Manga.Blue — FastAPI Backend with PostgreSQL
-============================================
-Endpoints:
-  GET  /api/manga              - list manga (filter, sort, paginate)
-  GET  /api/manga/{id}         - manga detail
-  GET  /api/manga/{id}/chapters - chapter list
-  GET  /api/chapters/{id}/pages - page images for reader
-  POST /api/migrate            - import manga_catalog.json → DB (run once)
-  GET  /api/proxy-image        - proxy image to bypass hotlink protection
-
-Requirements:
-  pip install fastapi uvicorn asyncpg python-dotenv httpx
-
-Env vars (Railway sets DATABASE_URL automatically):
-  DATABASE_URL=postgresql://user:pass@host:5432/dbname
-"""
-
 import os
 import json
 import hashlib
@@ -23,10 +5,11 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
@@ -34,11 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/mangablue")
-# asyncpg ต้องการ postgresql:// ไม่ใช่ postgres://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# ─── Lifespan (startup / shutdown) ─────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -51,12 +31,10 @@ app = FastAPI(title="Manga.Blue API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # เปลี่ยนเป็น domain จริงตอน production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ─── DB Schema ──────────────────────────────────────────────────────────────
 
 async def init_db(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
@@ -68,8 +46,8 @@ async def init_db(pool: asyncpg.Pool):
                 cover_url   TEXT,
                 source_url  TEXT,
                 source_site TEXT,
-                country     TEXT,          -- JP / KR / CN
-                status      TEXT,          -- ongoing / completed
+                country     TEXT,
+                status      TEXT,
                 genres      TEXT[],
                 description TEXT,
                 rating      FLOAT DEFAULT 0,
@@ -84,7 +62,7 @@ async def init_db(pool: asyncpg.Pool):
                 number      FLOAT NOT NULL,
                 title       TEXT,
                 source_url  TEXT NOT NULL,
-                pages       TEXT[],        -- array of image URLs (filled lazily)
+                pages       TEXT[],
                 published_at TIMESTAMPTZ,
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             );
@@ -95,20 +73,16 @@ async def init_db(pool: asyncpg.Pool):
             CREATE INDEX IF NOT EXISTS idx_manga_view_count  ON manga(view_count DESC);
         """)
 
-# ─── Helper ─────────────────────────────────────────────────────────────────
-
 def make_id(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:12]
-
-# ─── Endpoints ──────────────────────────────────────────────────────────────
 
 @app.get("/api/manga")
 async def list_manga(
     country: Optional[str] = None,
     genre:   Optional[str] = None,
     status:  Optional[str] = None,
-    sort:    str = "updated",          # updated | rating | views
-    q:       Optional[str] = None,     # search title
+    sort:    str = "updated",
+    q:       Optional[str] = None,
     page:    int = 1,
     limit:   int = 24,
 ):
@@ -145,7 +119,7 @@ async def list_manga(
 
     params += [limit, offset]
     query = f"""
-        SELECT id, title, title_th, cover_url, source_site,
+        SELECT id, title, title_th, cover_url, source_url, source_site,
                country, status, genres, rating, view_count, updated_at
         FROM manga
         {where}
@@ -181,7 +155,6 @@ async def get_manga(manga_id: str):
 async def get_chapters(manga_id: str):
     pool: asyncpg.Pool = app.state.pool
     async with pool.acquire() as conn:
-        # ตรวจว่า manga มีอยู่
         exists = await conn.fetchval("SELECT 1 FROM manga WHERE id = $1", manga_id)
         if not exists:
             raise HTTPException(404, "Manga not found")
@@ -198,10 +171,6 @@ async def get_chapters(manga_id: str):
 
 @app.get("/api/chapters/{chapter_id}/pages")
 async def get_pages(chapter_id: str, background_tasks: BackgroundTasks):
-    """
-    คืน array ของ image URLs สำหรับ reader
-    ถ้า pages ยังไม่ถูก scrape → scrape ทันที (lazy fetch)
-    """
     pool: asyncpg.Pool = app.state.pool
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -210,11 +179,9 @@ async def get_pages(chapter_id: str, background_tasks: BackgroundTasks):
     if not row:
         raise HTTPException(404, "Chapter not found")
 
-    # ถ้ามี pages อยู่แล้ว คืนเลย
     if row["pages"]:
         return {"pages": row["pages"]}
 
-    # Lazy scrape — ดึง pages จาก source_url
     pages = await scrape_chapter_pages(row["source_url"])
     if pages:
         async with pool.acquire() as conn:
@@ -226,41 +193,28 @@ async def get_pages(chapter_id: str, background_tasks: BackgroundTasks):
 
 
 async def scrape_chapter_pages(source_url: str) -> list[str]:
-    """
-    Placeholder — ใส่ logic scraping จริงของแต่ละ source ที่นี่
-    ตอนนี้คืน empty list เพื่อไม่ให้ error
-    TODO: ย้าย logic จาก aggregator.py มาใส่ที่นี่
-    """
     return []
 
-
-# ─── Image Proxy ────────────────────────────────────────────────────────────
 
 @app.get("/api/proxy-image")
 async def proxy_image(url: str):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
     
-    # ถอดรหัส URL ถ้าระบุมาแบบ encode
-    from urllib.parse import unquote, urlparse
     actual_url = unquote(url)
-    
-    # ดึง domain ต้นทางมาใส่เป็น Referer เพื่อให้เนียนว่าโหลดจากเว็บของเขาเอง
     parsed_uri = urlparse(actual_url)
     domain = f"{parsed_uri.scheme}://{parsed_uri.netloc}/"
     
     async with httpx.AsyncClient(verify=False) as client:
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Referer": domain,
                 "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
             }
-            # follow_redirects=True เพื่อป้องกันเว็บต้นทางเปลี่ยนเส้นทางรูป
             response = await client.get(actual_url, headers=headers, timeout=10.0, follow_redirects=True)
             
             if response.status_code != 200:
-                print(f"Proxy blocked or failed for {actual_url} - Status: {response.status_code}")
                 return Response(status_code=response.status_code)
             
             return Response(
@@ -268,19 +222,11 @@ async def proxy_image(url: str):
                 media_type=response.headers.get("content-type", "image/jpeg")
             )
         except Exception as e:
-            print(f"Proxy error for {actual_url}: {e}")
             return Response(status_code=500)
 
 
-# ─── Migration: catalog.json → PostgreSQL ───────────────────────────────────
-
-@app.post("/api/migrate")
+@app.api_route("/api/migrate", methods=["GET", "POST"])
 async def migrate_from_json(secret: str = Query(...)):
-    """
-    รัน 1 ครั้งเพื่อ import manga_catalog.json เข้า DB
-    เรียก: POST /api/migrate?secret=YOUR_SECRET
-    ตั้ง env MIGRATE_SECRET เพื่อป้องกันคนอื่น trigger
-    """
     if secret != os.getenv("MIGRATE_SECRET", "changeme"):
         raise HTTPException(403, "Invalid secret")
 
@@ -288,7 +234,7 @@ async def migrate_from_json(secret: str = Query(...)):
     if not catalog_path.exists():
         raise HTTPException(404, "manga_catalog.json not found")
 
-    with open(catalog_path) as f:
+    with open(catalog_path, encoding="utf-8") as f:
         data = json.load(f)
         catalog: list[dict] = data.get("manga") or data.get("items") or data.get("results") or data
         
@@ -298,7 +244,15 @@ async def migrate_from_json(secret: str = Query(...)):
 
     async with pool.acquire() as conn:
         for item in catalog:
-            manga_id = item.get("id") or make_id(item.get("source_url", item.get("title", "")))
+            first_source = item.get("sources", [{}])[0] if item.get("sources") else {}
+            source_url = item.get("source_url") or item.get("url") or first_source.get("url")
+            source_site = item.get("source_site") or item.get("source") or first_source.get("name")
+            
+            manga_id = item.get("id") or make_id(source_url or item.get("title", ""))
+            
+            cover_img = item.get("cover") or item.get("cover_url") or item.get("thumbnail")
+            desc_text = item.get("desc") or item.get("description")
+            
             try:
                 await conn.execute("""
                     INSERT INTO manga (
@@ -306,32 +260,35 @@ async def migrate_from_json(secret: str = Query(...)):
                         country, status, genres, description, rating, view_count, updated_at
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                     ON CONFLICT (id) DO UPDATE SET
-                        title      = EXCLUDED.title,
-                        cover_url  = EXCLUDED.cover_url,
-                        updated_at = EXCLUDED.updated_at
+                        title       = EXCLUDED.title,
+                        cover_url   = EXCLUDED.cover_url,
+                        source_url  = EXCLUDED.source_url,
+                        source_site = EXCLUDED.source_site,
+                        description = EXCLUDED.description,
+                        genres      = EXCLUDED.genres,
+                        updated_at  = EXCLUDED.updated_at
                 """,
                     manga_id,
                     item.get("title", ""),
                     item.get("title_th"),
-                    item.get("cover_url") or item.get("thumbnail"),
-                    item.get("source_url") or item.get("url"),
-                    item.get("source_site") or item.get("source"),
+                    cover_img,
+                    source_url,
+                    source_site,
                     (item.get("country") or "JP").upper(),
                     item.get("status", "ongoing"),
                     item.get("genres") or [],
-                    item.get("description"),
+                    desc_text,
                     float(item.get("rating") or 0),
                     int(item.get("view_count") or item.get("views") or 0),
                     item.get("updated_at"),
                 )
                 inserted += 1
-            except Exception:
+            except Exception as e:
+                print(f"Error inserting {item.get('title')}: {e}")
                 skipped += 1
 
     return {"inserted": inserted, "skipped": skipped, "total": len(catalog)}
 
-
-# ─── Health check ────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -341,9 +298,6 @@ async def health():
         return {"status": "ok", "db": "connected"}
     except Exception as e:
         return JSONResponse({"status": "error", "db": str(e)}, status_code=503)
-
-
-# ─── Run locally ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
