@@ -7,12 +7,45 @@ import {
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────
+// Config — เปลี่ยน URL ตรงนี้ที่เดียว
+// ─────────────────────────────────────────────────────────
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://manga-production-6994.up.railway.app";
+
+// ─────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────
 interface Source  { name: string; url: string; }
-interface Manga   { title: string; cover: string; genres: string[]; desc?: string; country?: string; sources: Source[]; }
-interface Catalog { total: number; genre_list: string[]; manga: Manga[]; }
-interface Chapter { title: string; url: string; }
+interface Manga   {
+  id: string;
+  title: string;
+  cover: string;       // mapped จาก cover_url
+  genres: string[];
+  desc?: string;       // mapped จาก description
+  country?: string;
+  sources: Source[];   // mapped จาก source_url + source_site
+  rating?: number;
+  view_count?: number;
+}
+interface Chapter { id: string; title: string; url: string; number: number; }
+
+// ─────────────────────────────────────────────────────────
+// Map API response → Manga type
+// ─────────────────────────────────────────────────────────
+function mapManga(item: any): Manga {
+  return {
+    id:      item.id,
+    title:   item.title,
+    cover:   item.cover_url || item.cover || "",
+    genres:  item.genres || [],
+    desc:    item.description || item.desc,
+    country: item.country,
+    sources: item.source_url
+      ? [{ name: item.source_site || "Source", url: item.source_url }]
+      : (item.sources || []),
+    rating:     item.rating,
+    view_count: item.view_count,
+  };
+}
 
 // ─────────────────────────────────────────────────────────
 // Cover proxy — รูปทุกใบต้องผ่าน /api/proxy-image
@@ -24,49 +57,20 @@ function proxyCover(url: string): string {
 }
 
 // ─────────────────────────────────────────────────────────
-// Source priority
-// ─────────────────────────────────────────────────────────
-const SOURCE_PRIORITY = [
-  "Manga168","MangaKimi","Mangastep","LamiManga","PopsManga",
-  "ReaperTrans","TanukiManga","Makimaaaaa","SpeedManga","ToomTamManga",
-  "Sodsaime","Doodmanga","ManhuaBug","ManhuaKey","ManhuaThai",
-  "ManhwaBreakup","Nekopost",
-];
-function getBestSource(sources: Source[]): Source {
-  for (const name of SOURCE_PRIORITY) {
-    const s = sources.find(s => s.name === name);
-    if (s) return s;
-  }
-  return sources[0];
-}
-
-// ─────────────────────────────────────────────────────────
-// Chapter fetcher
+// Chapter fetcher — ดึงจาก Railway API
 // ─────────────────────────────────────────────────────────
 async function fetchChapters(manga: Manga): Promise<Chapter[]> {
-  const best = getBestSource(manga.sources);
-  if (best.url.includes("nekopost.net")) {
-    const pid = best.url.split("/").pop();
-    try {
-      const res = await fetch(`https://www.nekopost.net/api/project/detail/${pid}`,
-        { signal: AbortSignal.timeout(8000) });
-      const json = await res.json();
-      return (json.listChapter || [])
-        .sort((a: any, b: any) => parseFloat(b.chapterNo) - parseFloat(a.chapterNo))
-        .map((ch: any) => ({
-          title: `ตอนที่ ${ch.chapterNo}${ch.chapterName?' — '+ch.chapterName:''}`,
-          url: `https://www.nekopost.net/manga/${pid}/${ch.chapterId}`,
-        }));
-    } catch { return []; }
-  }
   try {
-    const res = await fetch(
-      `http://localhost:8000/api/chapters?manga_url=${encodeURIComponent(best.url)}`,
-      { signal: AbortSignal.timeout(8000) }
-    );
+    const res = await fetch(`${API_BASE}/api/manga/${manga.id}/chapters`,
+      { signal: AbortSignal.timeout(8000) });
     if (res.ok) {
       const data = await res.json();
-      if (data.chapters?.length) return data.chapters;
+      return data.map((ch: any) => ({
+        id:     ch.id,
+        number: ch.number,
+        title:  ch.title || `ตอนที่ ${ch.number}`,
+        url:    ch.source_url,
+      }));
     }
   } catch { }
   return [];
@@ -102,10 +106,11 @@ const T = {
     noDesc:"ไม่มีเรื่องย่อ", synopsis:"เรื่องย่อ",
     allTitles:"รายการทั้งหมด (เรียงตามความนิยม)",
     searchResult:"ผลการค้นหา", toggleLang:"English",
-    noFile:"ไม่พบ manga_catalog.json",
-    serverOff:"server.py ไม่ได้รัน — กดแหล่งที่มาเพื่ออ่านโดยตรง",
+    noFile:"ไม่สามารถเชื่อมต่อ API ได้",
+    serverOff:"ไม่สามารถเชื่อมต่อ server ได้",
     openDirect:"อ่านที่ต้นฉบับ",
     popularity:"ความนิยม",
+    loading:"กำลังโหลด...",
   },
   en: {
     readNow:"Read Now", genres:"Genres", all:"All",
@@ -117,10 +122,11 @@ const T = {
     noDesc:"No description", synopsis:"Synopsis",
     allTitles:"All Titles (by popularity)",
     searchResult:"Search Result", toggleLang:"ภาษาไทย",
-    noFile:"manga_catalog.json not found",
-    serverOff:"server.py offline — use source links to read",
+    noFile:"Cannot connect to API",
+    serverOff:"Server offline",
     openDirect:"Read at Source",
     popularity:"Popularity",
+    loading:"Loading...",
   },
 };
 
@@ -151,7 +157,6 @@ const BannerSlider = memo(({ items, onOpen, t }: {
               <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/60 to-transparent" />
               <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
               <div className="relative z-10 h-full flex items-end md:items-center px-8 md:px-12 pb-8 md:pb-0 gap-7">
-                {/* Cover — ชัดเจน ไม่เบลอ */}
                 <img src={cover} alt={m.title}
                   className="hidden md:block h-56 w-auto aspect-[2/3] object-cover rounded-xl shadow-2xl border border-white/10 flex-shrink-0"
                   onError={e => { (e.target as HTMLImageElement).style.display='none'; }} />
@@ -167,7 +172,6 @@ const BannerSlider = memo(({ items, onOpen, t }: {
                     {m.genres.slice(0,3).map((g,gi) => (
                       <span key={gi} className="bg-white/10 border border-white/10 px-2.5 py-1 rounded-full text-[9px] font-bold text-zinc-300">{g}</span>
                     ))}
-                    <span className="text-zinc-500 text-[9px] self-center">{m.sources.length} แหล่ง</span>
                   </div>
                   {m.desc && <p className="text-zinc-400 text-xs leading-relaxed line-clamp-2 mb-4 max-w-lg hidden md:block">{m.desc}</p>}
                   <button className="bg-white text-black px-7 py-2.5 rounded-full text-[11px] font-black uppercase hover:bg-blue-600 hover:text-white transition-colors flex items-center gap-2 w-fit">
@@ -212,9 +216,6 @@ const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void })
         {m.country && (
           <div className="absolute bottom-1.5 left-1.5 text-[10px]">{COUNTRY_FLAG[m.country] || ''}</div>
         )}
-        {m.sources.length > 1 && (
-          <div className="absolute top-1.5 right-1.5 bg-blue-600 w-4 h-4 rounded-full flex items-center justify-center text-[7px] font-black text-white">{m.sources.length}</div>
-        )}
       </div>
       <div className="mt-1.5">
         <h3 className="text-[10px] font-bold leading-snug line-clamp-2 group-hover:text-blue-500 transition-colors">{m.title}</h3>
@@ -230,80 +231,91 @@ MangaCard.displayName = 'MangaCard';
 // ─────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────
-const PER_PAGE = 30;
+const PER_PAGE = 24;
+
+// ดึง genre list จาก API (distinct genres จาก DB)
+async function fetchGenres(): Promise<string[]> {
+  try {
+    // ดึง manga ชุดแรกแล้วรวม genres (fallback ง่ายๆ)
+    const res = await fetch(`${API_BASE}/api/manga?limit=100`);
+    const data = await res.json();
+    const set = new Set<string>();
+    (data.data || []).forEach((m: any) => (m.genres || []).forEach((g: string) => set.add(g)));
+    return Array.from(set).sort();
+  } catch { return []; }
+}
 
 export default function HomePage() {
-  const [catalog, setCatalog]       = useState<Catalog|null>(null);
-  const [catalogErr, setCatalogErr] = useState("");
-  const [loading, setLoading]       = useState(true);
-
-  const [all, setAll]               = useState<Manga[]>([]);
-  const [display, setDisplay]       = useState<Manga[]>([]);
-  const [banner, setBanner]         = useState<Manga[]>([]);
+  const [mangas, setMangas]         = useState<Manga[]>([]);
+  const [total, setTotal]           = useState(0);
   const [genres, setGenres]         = useState<string[]>([]);
+  const [banner, setBanner]         = useState<Manga[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [catalogErr, setCatalogErr] = useState("");
 
-  const [genre, setGenre]           = useState("");
-  const [countryFilter, setCountryFilter] = useState("");  // "JP" | "KR" | "CN" | ""
-  const [query, setQuery]           = useState("");
-  const [lang, setLang]             = useState<'th'|'en'>('th');
-  const [dark, setDark]             = useState(true);
-  const [page, setPage]             = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
+  const [genre, setGenre]                 = useState("");
+  const [countryFilter, setCountryFilter] = useState("");
+  const [query, setQuery]                 = useState("");
+  const [lang, setLang]                   = useState<'th'|'en'>('th');
+  const [dark, setDark]                   = useState(true);
+  const [page, setPage]                   = useState(1);
+  const [totalPages, setTotalPages]       = useState(1);
 
-  const [mOpen, setMOpen]           = useState(false);
-  const [mManga, setMManga]         = useState<Manga|null>(null);
-  const [mChaps, setMChaps]         = useState<Chapter[]>([]);
-  const [mLoading, setMLoading]     = useState(false);
-  const [dropOpen, setDropOpen]     = useState(false);
-  const [serverUp, setServerUp]     = useState<boolean|null>(null);
+  const [mOpen, setMOpen]       = useState(false);
+  const [mManga, setMManga]     = useState<Manga|null>(null);
+  const [mChaps, setMChaps]     = useState<Chapter[]>([]);
+  const [mLoading, setMLoading] = useState(false);
+  const [dropOpen, setDropOpen] = useState(false);
 
   const listRef = useRef<HTMLDivElement>(null);
   const t = T[lang];
 
+  // Theme
   useEffect(() => {
     const d = localStorage.getItem('manga-theme') !== 'light';
     setDark(d);
     document.documentElement.classList.toggle('dark', d);
   }, []);
 
+  // โหลด genres ครั้งเดียว
   useEffect(() => {
-    fetch('http://localhost:8000/api/catalog/stats',{signal:AbortSignal.timeout(2000)})
-      .then(r=>setServerUp(r.ok)).catch(()=>setServerUp(false));
+    fetchGenres().then(setGenres);
   }, []);
 
+  // โหลด manga จาก API เมื่อ filter/page เปลี่ยน
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/manga_catalog.json');
-        if (!res.ok) throw new Error();
-        const data: Catalog = await res.json();
-        setAll(data.manga);
-        setGenres(data.genre_list || []);
-        setCatalog(data);
-        // Banner = top 5 ที่มีรูปและ desc (เรียง popularity แล้ว)
-        const b = data.manga.filter(m => m.cover && m.desc).slice(0, 5);
-        setBanner(b.length ? b : data.manga.filter(m => m.cover).slice(0, 5));
-        setDisplay(data.manga.slice(0, PER_PAGE));
-        setTotalPages(Math.ceil(data.manga.length / PER_PAGE));
-      } catch { setCatalogErr(t.noFile); }
-      finally { setLoading(false); }
-    })();
-  }, []);
+    setLoading(true);
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(PER_PAGE),
+      sort: "views",
+    });
+    if (countryFilter) params.set("country", countryFilter);
+    if (genre)         params.set("genre", genre);
+    if (query)         params.set("q", query);
 
-  // Filter
-  useEffect(() => {
-    if (!all.length) return;
-    const q = query.toLowerCase().trim();
-    let f = all;
-    if (q) f = f.filter(m => m.title.toLowerCase().includes(q));
-    if (genre) f = f.filter(m => m.genres.includes(genre));
-    if (countryFilter) f = f.filter(m => m.country === countryFilter);
-    // catalog ถูก sort popularity แล้ว — ไม่ต้อง sort ใหม่
-    const start = (page-1)*PER_PAGE;
-    setDisplay(f.slice(start, start+PER_PAGE));
-    setTotalPages(Math.max(1, Math.ceil(f.length/PER_PAGE)));
-  }, [query, genre, countryFilter, page, all]);
+    fetch(`${API_BASE}/api/manga?${params}`)
+      .then(r => {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then(data => {
+        const mapped = (data.data || []).map(mapManga);
+        setMangas(mapped);
+        setTotal(data.total || 0);
+        setTotalPages(Math.max(1, Math.ceil((data.total || 0) / PER_PAGE)));
+        // Banner = 5 รายการแรกที่มีรูปและ desc
+        if (page === 1 && !genre && !countryFilter && !query) {
+          const b = mapped.filter((m: Manga) => m.cover && m.desc).slice(0, 5);
+          setBanner(b.length ? b : mapped.filter((m: Manga) => m.cover).slice(0, 5));
+        }
+        setCatalogErr("");
+      })
+      .catch(() => setCatalogErr(t.noFile))
+      .finally(() => setLoading(false));
+  }, [page, genre, countryFilter, query]);
 
+  // Modal scroll lock
   useEffect(() => {
     document.body.style.overflow = mOpen ? 'hidden' : '';
     return () => { document.body.style.overflow = ''; };
@@ -318,29 +330,27 @@ export default function HomePage() {
 
   const goPage = (p: number) => {
     setPage(p);
-    listRef.current?.scrollIntoView({behavior:'smooth',block:'start'});
+    listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
+
   const paginationGroup = () => {
     const s = Math.max(page-2,1), e = Math.min(s+4,totalPages);
-    return Array.from({length:Math.max(0,e-s+1)},(_,i)=>s+i);
+    return Array.from({ length: Math.max(0, e-s+1) }, (_,i) => s+i);
   };
 
   // ─── Loading / Error
-  if (loading) return (
+  if (loading && mangas.length === 0) return (
     <div className="fixed inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] gap-3">
       <Loader2 className="w-7 h-7 text-blue-600 animate-spin"/>
-      <p className="text-xs text-zinc-500 animate-pulse">กำลังโหลด catalog...</p>
+      <p className="text-xs text-zinc-500 animate-pulse">{t.loading}</p>
     </div>
   );
   if (catalogErr) return (
     <div className="fixed inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] gap-5 px-8 text-center">
       <BookOpen size={40} className="text-zinc-700"/>
-      <h2 className="text-lg font-black text-zinc-300">ยังไม่มี Catalog</h2>
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-left text-xs font-mono text-zinc-400 max-w-sm w-full space-y-2">
-        <p className="text-green-400">py aggregator.py</p>
-        <p className="text-blue-400">copy manga_catalog.json public\</p>
-      </div>
-      <button onClick={()=>window.location.reload()}
+      <h2 className="text-lg font-black text-zinc-300">ไม่สามารถเชื่อมต่อ API ได้</h2>
+      <p className="text-sm text-zinc-500">{API_BASE}</p>
+      <button onClick={() => window.location.reload()}
         className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-full text-sm font-black hover:bg-blue-500">
         <RefreshCw size={14}/> ลองใหม่
       </button>
@@ -349,13 +359,6 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-white dark:bg-[#0a0a0a] text-zinc-900 dark:text-zinc-100 pb-16">
-
-      {/* Server offline */}
-      {serverUp === false && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[300] bg-zinc-900/95 border border-zinc-700 text-zinc-400 text-[10px] font-bold px-4 py-2 rounded-full shadow-xl whitespace-nowrap pointer-events-none">
-          ⚠️ {t.serverOff}
-        </div>
-      )}
 
       {/* ═══ MODAL ═══ */}
       {mOpen && mManga && (
@@ -372,7 +375,6 @@ export default function HomePage() {
               <img src={proxyCover(mManga.cover)} className="w-full h-full object-cover blur-2xl scale-110 opacity-20 absolute inset-0" alt=""/>
               <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#0d0d0d] to-transparent"/>
               <div className="absolute bottom-0 left-6 md:left-10 translate-y-1/2">
-                {/* Cover ชัด */}
                 <img src={proxyCover(mManga.cover)}
                   className="w-20 md:w-28 aspect-[2/3] object-cover rounded-xl shadow-2xl border-2 border-white dark:border-zinc-800"
                   alt={mManga.title}
@@ -387,9 +389,7 @@ export default function HomePage() {
                 <div className="flex-1 min-w-0 space-y-4">
                   <div>
                     <div className="flex items-center gap-2 mb-1.5">
-                      {mManga.country && (
-                        <span className="text-xs">{COUNTRY_FLAG[mManga.country]||''}</span>
-                      )}
+                      {mManga.country && <span className="text-xs">{COUNTRY_FLAG[mManga.country]||''}</span>}
                       <h1 className="text-xl md:text-2xl font-black leading-tight">{mManga.title}</h1>
                     </div>
                     {mManga.genres.length > 0 && (
@@ -405,7 +405,7 @@ export default function HomePage() {
                     <p className="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">{mManga.desc || t.noDesc}</p>
                   </div>
                   <div>
-                    <p className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mb-2">{t.sources} ({mManga.sources.length})</p>
+                    <p className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mb-2">{t.sources}</p>
                     <div className="flex flex-wrap gap-1.5">
                       {mManga.sources.map((src,i)=>(
                         <a key={i} href={src.url} target="_blank" rel="noopener noreferrer"
@@ -418,7 +418,7 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Right */}
+                {/* Right — Chapter list */}
                 <div className="w-full md:w-60 shrink-0">
                   {mLoading ? (
                     <div className="flex flex-col items-center justify-center py-10 gap-3 border border-zinc-200 dark:border-zinc-800 rounded-xl bg-zinc-50 dark:bg-zinc-900/50">
@@ -459,7 +459,6 @@ export default function HomePage() {
                       </div>
                     </div>
                   ) : (
-                    /* ไม่มีตอน → แสดง source links โดยตรง */
                     <div className="border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 space-y-2">
                       <div className="flex items-center gap-2 mb-2">
                         <Info size={14} className="text-zinc-400 flex-shrink-0"/>
@@ -489,12 +488,12 @@ export default function HomePage() {
           <div className="flex-1 max-w-sm flex items-center gap-2 bg-zinc-100 dark:bg-zinc-900 px-3.5 py-2 rounded-xl border border-transparent focus-within:border-blue-500/40 transition-colors">
             <SearchIcon size={14} className="text-zinc-400 shrink-0"/>
             <input type="text" placeholder={t.searchPlaceholder} value={query}
-              onChange={e=>{setQuery(e.target.value);setPage(1);}}
+              onChange={e=>{ setQuery(e.target.value); setPage(1); }}
               className="bg-transparent outline-none w-full text-sm placeholder:text-zinc-500 dark:placeholder:text-zinc-600"/>
-            {query && <button onClick={()=>{setQuery("");setPage(1);}}><X size={12} className="text-zinc-400 hover:text-zinc-600"/></button>}
+            {query && <button onClick={()=>{ setQuery(""); setPage(1); }}><X size={12} className="text-zinc-400 hover:text-zinc-600"/></button>}
           </div>
           <div className="ml-auto flex items-center gap-2">
-            {catalog && <span className="text-[10px] text-zinc-500 font-bold hidden md:block">{catalog.total.toLocaleString()} เรื่อง</span>}
+            <span className="text-[10px] text-zinc-500 font-bold hidden md:block">{total.toLocaleString()} เรื่อง</span>
             <button onClick={()=>setLang(l=>l==='th'?'en':'th')}
               className="flex items-center gap-1 px-3 py-2 rounded-lg text-[10px] font-black bg-zinc-100 dark:bg-zinc-900 text-zinc-500 hover:text-blue-600 border border-zinc-200 dark:border-zinc-800">
               <Globe size={11}/> {t.toggleLang}
@@ -521,7 +520,7 @@ export default function HomePage() {
           <p className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mb-2">{t.country}</p>
           <div className="flex gap-1.5 overflow-x-auto pb-1" style={{scrollbarWidth:'none'}}>
             {[{code:"", labelTH:"🌐 ทั้งหมด", labelEN:"🌐 All"}, {code:"JP",labelTH:"🇯🇵 ญี่ปุ่น",labelEN:"🇯🇵 Japanese"}, {code:"KR",labelTH:"🇰🇷 เกาหลี",labelEN:"🇰🇷 Korean"}, {code:"CN",labelTH:"🇨🇳 จีน",labelEN:"🇨🇳 Chinese"}].map(item=>(
-              <button key={item.code} onClick={()=>{setCountryFilter(item.code);setPage(1);}}
+              <button key={item.code} onClick={()=>{ setCountryFilter(item.code); setPage(1); }}
                 className={`px-4 py-2 rounded-full text-[10px] font-black whitespace-nowrap flex-shrink-0 transition-all
                   ${countryFilter===item.code?'bg-blue-600 text-white shadow':'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 hover:text-blue-600'}`}>
                 {lang==='th'?item.labelTH:item.labelEN}
@@ -534,13 +533,13 @@ export default function HomePage() {
         <section className="px-4 md:px-6 max-w-7xl mx-auto" ref={listRef}>
           <p className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mb-2">{t.genres}</p>
           <div className="flex gap-1.5 overflow-x-auto pb-1" style={{scrollbarWidth:'none'}}>
-            <button onClick={()=>{setGenre("");setPage(1);}}
+            <button onClick={()=>{ setGenre(""); setPage(1); }}
               className={`px-3.5 py-2 rounded-full text-[10px] font-black whitespace-nowrap flex-shrink-0 transition-all
                 ${!genre?'bg-blue-600 text-white shadow':'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 hover:text-blue-600'}`}>
               {t.all}
             </button>
             {genres.map(g=>(
-              <button key={g} onClick={()=>{setGenre(g);setPage(1);}}
+              <button key={g} onClick={()=>{ setGenre(g); setPage(1); }}
                 className={`px-3.5 py-2 rounded-full text-[10px] font-black whitespace-nowrap flex-shrink-0 transition-all
                   ${genre===g?'bg-blue-600 text-white shadow':'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 hover:text-blue-600'}`}>
                 {g}
@@ -555,27 +554,28 @@ export default function HomePage() {
             <Flame size={14} className="text-orange-500 animate-pulse"/>
             <span className="text-[9px] font-black uppercase tracking-widest text-zinc-400">
               {query
-                ? `${t.searchResult}: "${query}" — ${display.length}`
+                ? `${t.searchResult}: "${query}" — ${total}`
                 : genre || countryFilter
-                  ? `${genre||''} ${countryFilter?`(${countryFilter})`:''} — ${display.length} เรื่อง`
+                  ? `${genre||''} ${countryFilter?`(${countryFilter})`:''} — ${total} เรื่อง`
                   : `${t.allTitles} — หน้า ${page}/${totalPages}`}
             </span>
+            {loading && <Loader2 size={12} className="text-blue-500 animate-spin ml-auto"/>}
           </div>
 
-          {display.length===0 ? (
+          {mangas.length===0 && !loading ? (
             <div className="flex flex-col items-center justify-center py-20 gap-3 text-zinc-500">
               <SearchIcon size={24} className="opacity-20"/>
               <p className="text-sm font-bold">ไม่พบมังงะ</p>
             </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 md:gap-4">
-              {display.map((m,i)=>(
-                <MangaCard key={`${m.title}-${i}`} m={m} onOpen={openModal}/>
+              {mangas.map((m,i)=>(
+                <MangaCard key={`${m.id}-${i}`} m={m} onOpen={openModal}/>
               ))}
             </div>
           )}
 
-          {totalPages>1 && !query && (
+          {totalPages>1 && (
             <div className="mt-10 flex items-center justify-center gap-1.5">
               <button onClick={()=>goPage(Math.max(1,page-1))} disabled={page===1}
                 className="w-8 h-8 flex items-center justify-center rounded-xl bg-zinc-100 dark:bg-zinc-900 text-zinc-500 disabled:opacity-30 hover:text-blue-600 transition-colors">
