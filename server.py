@@ -120,7 +120,7 @@ async def list_manga(
     params += [limit, offset]
     query = f"""
         SELECT id, title, title_th, cover_url, source_url, source_site,
-               country, status, genres, rating, view_count, updated_at
+               country, status, genres, description, rating, view_count, updated_at
         FROM manga
         {where}
         ORDER BY {order}
@@ -140,7 +140,6 @@ async def list_manga(
         "limit": limit,
     }
 
-
 @app.get("/api/manga/{manga_id}")
 async def get_manga(manga_id: str):
     pool: asyncpg.Pool = app.state.pool
@@ -149,7 +148,6 @@ async def get_manga(manga_id: str):
     if not row:
         raise HTTPException(404, "Manga not found")
     return dict(row)
-
 
 @app.get("/api/manga/{manga_id}/chapters")
 async def get_chapters(manga_id: str):
@@ -167,7 +165,6 @@ async def get_chapters(manga_id: str):
         """, manga_id)
 
     return [dict(r) for r in rows]
-
 
 @app.get("/api/chapters/{chapter_id}/pages")
 async def get_pages(chapter_id: str, background_tasks: BackgroundTasks):
@@ -191,10 +188,8 @@ async def get_pages(chapter_id: str, background_tasks: BackgroundTasks):
             )
     return {"pages": pages}
 
-
 async def scrape_chapter_pages(source_url: str) -> list[str]:
     return []
-
 
 @app.get("/api/proxy-image")
 async def proxy_image(url: str):
@@ -224,9 +219,8 @@ async def proxy_image(url: str):
         except Exception as e:
             return Response(status_code=500)
 
-
 @app.api_route("/api/migrate", methods=["GET", "POST"])
-async def migrate_from_json(secret: str = Query(...)):
+async def migrate_from_json(secret: str = Query(...), clear: bool = False):
     if secret != os.getenv("MIGRATE_SECRET", "changeme"):
         raise HTTPException(403, "Invalid secret")
 
@@ -239,6 +233,12 @@ async def migrate_from_json(secret: str = Query(...)):
         catalog: list[dict] = data.get("manga") or data.get("items") or data.get("results") or data
         
     pool: asyncpg.Pool = app.state.pool
+
+    if clear:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE TABLE chapters CASCADE;")
+            await conn.execute("TRUNCATE TABLE manga CASCADE;")
+
     inserted = 0
     skipped  = 0
 
@@ -284,11 +284,9 @@ async def migrate_from_json(secret: str = Query(...)):
                 )
                 inserted += 1
             except Exception as e:
-                print(f"Error inserting {item.get('title')}: {e}")
                 skipped += 1
 
     return {"inserted": inserted, "skipped": skipped, "total": len(catalog)}
-
 
 @app.get("/health")
 async def health():
