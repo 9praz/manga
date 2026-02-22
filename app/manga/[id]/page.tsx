@@ -111,7 +111,7 @@ export default function MangaDetails({ params }: { params: Promise<{ id: string 
             {chapters.length > 0 ? (
               chapters.map((ch: any) => (
                 <Link 
-                  href={`/read/${id}/${ch.id}`} // ลิงก์ไปยังหน้า Reader ที่เราสร้างไว้
+                  href={`/manga/${id}/read/${ch.id}`}
                   key={ch.id}
                   className="group flex items-center justify-between p-5 bg-zinc-900/50 hover:bg-blue-600 rounded-[1.5rem] border border-white/5 hover:border-blue-400/50 transition-all duration-300"
                 >
