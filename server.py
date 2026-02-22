@@ -1,469 +1,331 @@
-import asyncio
-import sys
-import logging
-import re
+"""
+Manga.Blue — FastAPI Backend with PostgreSQL
+============================================
+Endpoints:
+  GET  /api/manga              - list manga (filter, sort, paginate)
+  GET  /api/manga/{id}         - manga detail
+  GET  /api/manga/{id}/chapters - chapter list
+  GET  /api/chapters/{id}/pages - page images for reader
+  POST /api/migrate            - import manga_catalog.json → DB (run once)
+  GET  /api/proxy-image        - proxy image to bypass hotlink protection
+
+Requirements:
+  pip install fastapi uvicorn asyncpg python-dotenv httpx
+
+Env vars (Railway sets DATABASE_URL automatically):
+  DATABASE_URL=postgresql://user:pass@host:5432/dbname
+"""
+
+import os
 import json
-from fastapi import FastAPI, Response
+import hashlib
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Optional
+
+import asyncpg
+import httpx
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from bs4 import BeautifulSoup
-from curl_cffi.requests import AsyncSession
-from urllib.parse import urlparse
-import uvicorn
+from fastapi.responses import StreamingResponse, JSONResponse
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("AllInOneManga")
+load_dotenv()
 
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/mangablue")
+# asyncpg ต้องการ postgresql:// ไม่ใช่ postgres://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# ─── Lifespan (startup / shutdown) ─────────────────────────────────────────
 
-async def _fetch(url: str, is_api=False):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json" if is_api else "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7"
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    await init_db(app.state.pool)
+    yield
+    await app.state.pool.close()
+
+app = FastAPI(title="Manga.Blue API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # เปลี่ยนเป็น domain จริงตอน production
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─── DB Schema ──────────────────────────────────────────────────────────────
+
+async def init_db(pool: asyncpg.Pool):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS manga (
+                id          TEXT PRIMARY KEY,
+                title       TEXT NOT NULL,
+                title_th    TEXT,
+                cover_url   TEXT,
+                source_url  TEXT,
+                source_site TEXT,
+                country     TEXT,          -- JP / KR / CN
+                status      TEXT,          -- ongoing / completed
+                genres      TEXT[],
+                description TEXT,
+                rating      FLOAT DEFAULT 0,
+                view_count  BIGINT DEFAULT 0,
+                updated_at  TIMESTAMPTZ,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS chapters (
+                id          TEXT PRIMARY KEY,
+                manga_id    TEXT REFERENCES manga(id) ON DELETE CASCADE,
+                number      FLOAT NOT NULL,
+                title       TEXT,
+                source_url  TEXT NOT NULL,
+                pages       TEXT[],        -- array of image URLs (filled lazily)
+                published_at TIMESTAMPTZ,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chapters_manga_id ON chapters(manga_id);
+            CREATE INDEX IF NOT EXISTS idx_manga_country     ON manga(country);
+            CREATE INDEX IF NOT EXISTS idx_manga_rating      ON manga(rating DESC);
+            CREATE INDEX IF NOT EXISTS idx_manga_view_count  ON manga(view_count DESC);
+        """)
+
+# ─── Helper ─────────────────────────────────────────────────────────────────
+
+def make_id(text: str) -> str:
+    return hashlib.md5(text.encode()).hexdigest()[:12]
+
+# ─── Endpoints ──────────────────────────────────────────────────────────────
+
+@app.get("/api/manga")
+async def list_manga(
+    country: Optional[str] = None,
+    genre:   Optional[str] = None,
+    status:  Optional[str] = None,
+    sort:    str = "updated",          # updated | rating | views
+    q:       Optional[str] = None,     # search title
+    page:    int = 1,
+    limit:   int = 24,
+):
+    pool: asyncpg.Pool = app.state.pool
+    offset = (page - 1) * limit
+
+    conditions = []
+    params = []
+
+    if country:
+        params.append(country.upper())
+        conditions.append(f"country = ${len(params)}")
+
+    if genre:
+        params.append(genre)
+        conditions.append(f"${len(params)} = ANY(genres)")
+
+    if status:
+        params.append(status)
+        conditions.append(f"status = ${len(params)}")
+
+    if q:
+        params.append(f"%{q}%")
+        conditions.append(f"(title ILIKE ${len(params)} OR title_th ILIKE ${len(params)})")
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    order_map = {
+        "updated": "updated_at DESC NULLS LAST",
+        "rating":  "rating DESC",
+        "views":   "view_count DESC",
     }
-    async with AsyncSession() as session:
-        try:
-            return await session.get(url, headers=headers, impersonate="chrome120", timeout=20)
-        except Exception as e:
-            logger.error(f"💥 Fetch Error: {e}")
-            return None
+    order = order_map.get(sort, "updated_at DESC NULLS LAST")
 
-async def _fetch_zeist_chapters(manga_url: str, session: AsyncSession) -> list:
-    chapters = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    params += [limit, offset]
+    query = f"""
+        SELECT id, title, title_th, cover_url, source_site,
+               country, status, genres, rating, view_count, updated_at
+        FROM manga
+        {where}
+        ORDER BY {order}
+        LIMIT ${len(params)-1} OFFSET ${len(params)}
+    """
 
-    r = await session.get(manga_url, headers=headers, impersonate="chrome120", timeout=20)
-    if not r or not r.text:
-        return chapters
+    count_query = f"SELECT COUNT(*) FROM manga {where}"
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    async with pool.acquire() as conn:
+        rows  = await conn.fetch(query, *params)
+        total = await conn.fetchval(count_query, *params[:-2])
 
-    # ── ชั้น A: ดึงจาก JSON ที่ฝังใน <script>
-    for script in soup.find_all("script"):
-        raw = script.string or ""
-        for pattern in [
-            r'(?:var\s+)?chapterList\s*=\s*(\[.*?\])\s*;',
-            r'(?:var\s+)?chapters\s*=\s*(\[.*?\])\s*;',
-            r'"chapter_list"\s*:\s*(\[.*?\])',
-            r'\"chapters\"\s*:\s*(\[.*?\])',
-        ]:
-            m = re.search(pattern, raw, re.S)
-            if m:
-                try:
-                    data = json.loads(m.group(1))
-                    for item in data:
-                        url_val = item.get("url") or item.get("link") or item.get("href") or ""
-                        title_val = (item.get("title") or item.get("name") or
-                                     item.get("chapter") or item.get("label") or "")
-                        if url_val and "http" in url_val:
-                            chapters.append({"title": str(title_val), "url": url_val})
-                    if chapters:
-                        logger.info(f"✅ Zeist JSON script found: {len(chapters)} chapters")
-                        return chapters
-                except:
-                    pass
-
-    # ── ชั้น B: JSON-LD
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "")
-            for key in ["hasPart", "episode", "chapter"]:
-                parts = data.get(key, [])
-                if isinstance(parts, list):
-                    for part in parts:
-                        u = part.get("url") or part.get("@id") or ""
-                        t = part.get("name") or part.get("headline") or ""
-                        if u and "http" in u:
-                            chapters.append({"title": t, "url": u})
-            if chapters:
-                logger.info(f"✅ JSON-LD found: {len(chapters)} chapters")
-                return chapters
-        except:
-            pass
-
-    # ── ชั้น C: Blogger/Atom Feed
-    parsed = urlparse(manga_url)
-    manga_slug = parsed.path.strip("/").split("/")[-1]
-    feed_urls = [
-        f"{parsed.scheme}://{parsed.netloc}/feeds/posts/default/-/{manga_slug}?alt=json&max-results=500",
-        f"{parsed.scheme}://{parsed.netloc}/feeds/posts/default?alt=json&max-results=500&q={manga_slug}",
-    ]
-    for feed_url in feed_urls:
-        try:
-            rf = await session.get(feed_url, headers={**headers, "Accept": "application/json"},
-                                   impersonate="chrome120", timeout=15)
-            if rf and rf.status_code == 200:
-                feed_data = rf.json()
-                entries = feed_data.get("feed", {}).get("entry", [])
-                for entry in entries:
-                    title = entry.get("title", {}).get("$t", "")
-                    links = entry.get("link", [])
-                    href = next((l.get("href", "") for l in links if l.get("rel") == "alternate"), "")
-                    if href and "http" in href:
-                        chapters.append({"title": title, "url": href})
-                if chapters:
-                    logger.info(f"✅ Blogger Feed found: {len(chapters)} chapters")
-                    return chapters
-        except Exception as e:
-            logger.warning(f"Feed fetch error: {e}")
-
-    # ── ชั้น D: Zeist/Blogspot selectors
-    zeist_selectors = [
-        ".chapter-list li a", ".episodelist a", ".eps-item a",
-        "ul.episodelist li a", "#chapter-list a", ".chapterlist a",
-        "div.eplister li a", "div.bixbox.bxcl li a",
-        ".ls-title a", "li.ep-item a", ".lchx a",
-        "a[href*='/chapter/']", "a[href*='/ch-']", "a[href*='-chapter-']",
-    ]
-    for sel in zeist_selectors:
-        for a in soup.select(sel):
-            href = a.get("href", "")
-            title = a.get_text(strip=True)
-            if href and "http" in href and title and href not in [c['url'] for c in chapters]:
-                chapters.append({"title": title, "url": href})
-        if chapters:
-            logger.info(f"✅ Zeist selector [{sel}] found: {len(chapters)} chapters")
-            return chapters
-
-    return chapters
-
-
-@app.get("/api/chapters")
-async def get_chapters(manga_url: str):
-    chapters = []
-
-    # 🐈 ค่าย Nekopost
-    if "nekopost.net" in manga_url:
-        project_id = manga_url.strip("/").split("/")[-1]
-        r = await _fetch(f"https://api.osemocphoto.com/frontAPI/getProjectInfo/{project_id}/th", is_api=True)
-        if r and r.status_code == 200:
-            data = r.json()
-            for ch in data.get("chapterList", []):
-                chapters.append({
-                    "title": f"Ep. {ch['chapterNo']} {ch.get('chapterName', '')}".strip(),
-                    "url": f"https://www.nekopost.net/manga/{project_id}/{ch['chapterId']}"
-                })
-        return {"chapters": chapters}
-
-    async with AsyncSession() as session:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = await session.get(manga_url, headers=headers, impersonate="chrome120", timeout=20)
-
-        if r and r.text:
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            # 🎯 ชั้นที่ 1: selector มาตรฐาน
-            selectors = [
-                "#chapterlist a", ".eplister a", ".wp-manga-chapter > a", ".page-item-detail > a",
-                ".listing-chapters_wrap a", "ul.main li a", ".chapter-list a", ".chbox a",
-                ".main-version a", ".chapter-title a", ".eplister ul li a"
-            ]
-            for sel in selectors:
-                for a in soup.select(sel):
-                    href, title = a.get("href"), a.get_text(strip=True)
-                    if href and title and "http" in href and href not in [c['url'] for c in chapters]:
-                        chapters.append({"title": title, "url": href})
-
-            # 🎯 ชั้นที่ 2: AJAX /ajax/chapters/
-            if not chapters:
-                ajax_url = manga_url.rstrip('/') + "/ajax/chapters/"
-                r_ajax = await session.post(ajax_url, headers=headers, impersonate="chrome120")
-                if r_ajax and r_ajax.status_code == 200:
-                    soup_ajax = BeautifulSoup(r_ajax.text, "html.parser")
-                    for a in soup_ajax.select(".wp-manga-chapter a, li a"):
-                        href, title = a.get("href"), a.get_text(strip=True)
-                        if href and title and "http" in href and href not in [c['url'] for c in chapters]:
-                            chapters.append({"title": title, "url": href})
-
-            # 🎯 ชั้นที่ 3: admin-ajax.php
-            if not chapters:
-                manga_id_tag = soup.select_one(
-                    "#manga-chapters-holder, .wp-manga-action-button, input.rating-post-id, #wp-manga-current-manga, [data-post]"
-                )
-                # เพิ่ม: ดึงจาก div.bookmark[data-id] (รูปแบบของ manga1688.com)
-                if not manga_id_tag:
-                    manga_id_tag = soup.select_one("div.bookmark[data-id], div[class*='bookmark'][data-id]")
-
-                manga_id = None
-                if manga_id_tag:
-                    manga_id = manga_id_tag.get("data-id") or manga_id_tag.get("value") or manga_id_tag.get("data-post")
-
-                if manga_id:
-                    # ⚡ ดึง ajaxUrl จาก ts_configs ก่อน (รองรับ subdomain เช่น www2.manga1688.com)
-                    # ถ้าไม่มีค่อย fallback เป็น domain เดิม
-                    admin_ajax_url = None
-                    for script in soup.find_all("script"):
-                        raw = script.string or ""
-                        m = re.search(r'"ajaxUrl"\s*:\s*"([^"]+)"', raw)
-                        if m:
-                            admin_ajax_url = m.group(1).replace('\\/', '/')
-                            logger.info(f"✅ Found ajaxUrl from ts_configs: {admin_ajax_url}")
-                            break
-                    if not admin_ajax_url:
-                        p = urlparse(manga_url)
-                        admin_ajax_url = f"{p.scheme}://{p.netloc}/wp-admin/admin-ajax.php"
-                        logger.info(f"⚠️ ajaxUrl not found in script, fallback: {admin_ajax_url}")
-
-                    r_ajax2 = await session.post(
-                        admin_ajax_url,
-                        data={"action": "manga_get_chapters", "manga": manga_id},
-                        headers=headers, impersonate="chrome120"
-                    )
-                    if r_ajax2 and r_ajax2.status_code == 200:
-                        soup_ajax2 = BeautifulSoup(r_ajax2.text, "html.parser")
-                        for a in soup_ajax2.select("a"):
-                            href, title = a.get("href"), a.get_text(strip=True)
-                            if href and title and "http" in href and href not in [c['url'] for c in chapters]:
-                                chapters.append({"title": title, "url": href})
-
-            # 🆕 ชั้นที่ 4: Zeist/Blogger/Mangabooth
-            if not chapters:
-                logger.info(f"🔍 Trying Zeist/Blogger strategy for: {manga_url}")
-                chapters = await _fetch_zeist_chapters(manga_url, session)
-
-    def extract_num(t):
-        match = re.search(r'(\d+(?:\.\d+)?)', t)
-        return float(match.group(1)) if match else 0.0
-
-    def clean_title(t):
-        # ดึงเฉพาะ "Chapter X" หรือ "Ep. X" ออกมา ตัดขยะที่ซ้ำและวันที่ออก
-        m = re.match(r'^((?:Chapter|Ep\.?|Episode|Vol\.?)\s*[\d.]+)', t.strip(), re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-        # ลบวันที่
-        t = re.sub(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d+,\s+\d{4}', '', t)
-        t = re.sub(r'\d{4}-\d{2}-\d{2}', '', t)
-        t = t.strip()
-        if len(t) > 60:
-            t = t[:60].rsplit(' ', 1)[0]
-        return t.strip('- ').strip()
-
-    for c in chapters:
-        c['title'] = clean_title(c['title'])
-
-    chapters.sort(key=lambda x: extract_num(x['title']), reverse=True)
-    return {"chapters": chapters}
-
-
-@app.get("/api/images")
-async def get_images(chapter_url: str):
-    images = []
-
-    # 🐈 Nekopost
-    if "nekopost.net" in chapter_url:
-        parts = chapter_url.strip("/").split("/")
-        r = await _fetch(f"https://api.osemocphoto.com/frontAPI/getChapterDetail/{parts[-2]}/{parts[-1]}", is_api=True)
-        if r and r.status_code == 200:
-            data = r.json()
-            images = [f"{data.get('host', '')}{p.get('pageName', '')}" for p in data.get("pageItem", [])]
-        return {"images": images}
-
-    r = await _fetch(chapter_url)
-    if not r or not r.text:
-        return {"images": []}
-
-    # ⚡ ts_reader.run(...)
-    json_match = re.search(r'ts_reader\.run\((.*?)\);', r.text, re.S)
-    if json_match:
-        raw_urls = re.findall(r'"(https?://[^"]+)"', json_match.group(1))
-        for u in raw_urls:
-            clean_url = u.replace('\\/', '/')
-            if any(ext in clean_url.lower() for ext in ['.jpg', '.png', '.jpeg', '.webp']):
-                if clean_url not in images:
-                    images.append(clean_url)
-        if images:
-            return {"images": images}
-
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    # 🆕 ดึงรูปจาก JSON ใน <script>
-    for script in soup.find_all("script"):
-        raw = script.string or ""
-        for pattern in [
-            r'(?:var\s+)?imageList\s*=\s*(\[.*?\])\s*;',
-            r'(?:var\s+)?images\s*=\s*(\[.*?\])\s*;',
-            r'"imageList"\s*:\s*(\[.*?\])',
-            r'\"pages\"\s*:\s*(\[.*?\])',
-            r'(?:var\s+)?pages\s*=\s*(\[.*?\])\s*;',
-        ]:
-            m = re.search(pattern, raw, re.S)
-            if m:
-                try:
-                    data = json.loads(m.group(1))
-                    for item in data:
-                        if isinstance(item, str) and "http" in item:
-                            if item not in images:
-                                images.append(item)
-                        elif isinstance(item, dict):
-                            src = item.get("url") or item.get("src") or item.get("image") or ""
-                            if src and "http" in src and src not in images:
-                                images.append(src)
-                    if images:
-                        logger.info(f"✅ Found {len(images)} images from inline JSON")
-                        return {"images": images}
-                except:
-                    pass
-
-    # 🎯 selector มาตรฐาน + Zeist
-    img_selectors = [
-        ".reading-content img", ".wp-manga-chapter-img img", ".wp-manga-chapter-img",
-        ".page-break img", "#readerarea img", ".entry-content img",
-        "#image-container img", ".list-image-detail img", ".chapter-image img",
-        "img.lazyload",
-        "#Baca_Komik img", ".imgbox img", ".reader-area img",
-        "#chapter-image img", ".chapter-content img", ".read-area img",
-        "div#img-holder img", "#komik-image img",
-    ]
-    for sel in img_selectors:
-        for img in soup.select(sel):
-            src = (img.get("data-src") or img.get("data-lazy-src") or
-                   img.get("data-cfsrc") or img.get("data-altsrc") or
-                   img.get("data-original") or img.get("src"))
-            if src and "http" in src:
-                src = src.strip()
-                if "logo" not in src.lower() and "banner" not in src.lower() and src not in images:
-                    images.append(src)
-
-    return {"images": images}
-
-
-@app.get("/api/proxy_image")
-async def proxy_image(url: str, source_url: str = None):
-    clean_url = url.replace('\\/', '/')
-    p_img = urlparse(clean_url)
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Host": p_img.netloc,
-        "Connection": "keep-alive"
+    return {
+        "data":  [dict(r) for r in rows],
+        "total": total,
+        "page":  page,
+        "limit": limit,
     }
 
-    async with AsyncSession() as session:
-        strategies = []
-        if source_url:
-            p_src = urlparse(source_url)
-            strategies.append({"Referer": source_url, "Origin": f"{p_src.scheme}://{p_src.netloc}"})
-            domain_parts = p_src.netloc.split('.')
-            if len(domain_parts) >= 2:
-                root_domain = f"{p_src.scheme}://{domain_parts[-2]}.{domain_parts[-1]}"
-                strategies.append({"Referer": f"{root_domain}/", "Origin": root_domain})
 
-        img_base = f"{p_img.scheme}://{p_img.netloc}"
-        strategies.append({"Referer": f"{img_base}/", "Origin": img_base})
-        strategies.append({"Referer": "https://www.google.com/"})
-        strategies.append({})
+@app.get("/api/manga/{manga_id}")
+async def get_manga(manga_id: str):
+    pool: asyncpg.Pool = app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM manga WHERE id = $1", manga_id)
+    if not row:
+        raise HTTPException(404, "Manga not found")
+    return dict(row)
 
-        for extra in strategies:
-            current_headers = headers.copy()
-            current_headers.update(extra)
+
+@app.get("/api/manga/{manga_id}/chapters")
+async def get_chapters(manga_id: str):
+    pool: asyncpg.Pool = app.state.pool
+    async with pool.acquire() as conn:
+        # ตรวจว่า manga มีอยู่
+        exists = await conn.fetchval("SELECT 1 FROM manga WHERE id = $1", manga_id)
+        if not exists:
+            raise HTTPException(404, "Manga not found")
+
+        rows = await conn.fetch("""
+            SELECT id, number, title, source_url, published_at
+            FROM chapters
+            WHERE manga_id = $1
+            ORDER BY number DESC
+        """, manga_id)
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/chapters/{chapter_id}/pages")
+async def get_pages(chapter_id: str, background_tasks: BackgroundTasks):
+    """
+    คืน array ของ image URLs สำหรับ reader
+    ถ้า pages ยังไม่ถูก scrape → scrape ทันที (lazy fetch)
+    """
+    pool: asyncpg.Pool = app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, source_url, pages FROM chapters WHERE id = $1", chapter_id
+        )
+    if not row:
+        raise HTTPException(404, "Chapter not found")
+
+    # ถ้ามี pages อยู่แล้ว คืนเลย
+    if row["pages"]:
+        return {"pages": row["pages"]}
+
+    # Lazy scrape — ดึง pages จาก source_url
+    pages = await scrape_chapter_pages(row["source_url"])
+    if pages:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE chapters SET pages = $1 WHERE id = $2",
+                pages, chapter_id
+            )
+    return {"pages": pages}
+
+
+async def scrape_chapter_pages(source_url: str) -> list[str]:
+    """
+    Placeholder — ใส่ logic scraping จริงของแต่ละ source ที่นี่
+    ตอนนี้คืน empty list เพื่อไม่ให้ error
+    TODO: ย้าย logic จาก aggregator.py มาใส่ที่นี่
+    """
+    return []
+
+
+# ─── Image Proxy ────────────────────────────────────────────────────────────
+
+@app.get("/api/proxy-image")
+async def proxy_image(url: str = Query(...)):
+    """Proxy ภาพเพื่อ bypass hotlink protection"""
+    ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            resp = await client.get(url, headers={
+                "Referer": url,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
+        ct = resp.headers.get("content-type", "").split(";")[0].strip()
+        if ct not in ALLOWED_CONTENT_TYPES:
+            raise HTTPException(400, "Not an image")
+        return StreamingResponse(iter([resp.content]), media_type=ct)
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"Cannot fetch image: {e}")
+
+
+# ─── Migration: catalog.json → PostgreSQL ───────────────────────────────────
+
+@app.post("/api/migrate")
+async def migrate_from_json(secret: str = Query(...)):
+    """
+    รัน 1 ครั้งเพื่อ import manga_catalog.json เข้า DB
+    เรียก: POST /api/migrate?secret=YOUR_SECRET
+    ตั้ง env MIGRATE_SECRET เพื่อป้องกันคนอื่น trigger
+    """
+    if secret != os.getenv("MIGRATE_SECRET", "changeme"):
+        raise HTTPException(403, "Invalid secret")
+
+    catalog_path = Path(__file__).parent / "public" / "manga_catalog.json"
+    if not catalog_path.exists():
+        raise HTTPException(404, "manga_catalog.json not found")
+
+    with open(catalog_path) as f:
+        catalog: list[dict] = json.load(f)
+
+    pool: asyncpg.Pool = app.state.pool
+    inserted = 0
+    skipped  = 0
+
+    async with pool.acquire() as conn:
+        for item in catalog:
+            manga_id = item.get("id") or make_id(item.get("source_url", item.get("title", "")))
             try:
-                r = await session.get(clean_url, headers=current_headers, impersonate="chrome120", timeout=12)
-                if r.status_code == 200:
-                    return Response(content=r.content, media_type=r.headers.get("Content-Type", "image/jpeg"))
-            except:
-                continue
+                await conn.execute("""
+                    INSERT INTO manga (
+                        id, title, title_th, cover_url, source_url, source_site,
+                        country, status, genres, description, rating, view_count, updated_at
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                    ON CONFLICT (id) DO UPDATE SET
+                        title      = EXCLUDED.title,
+                        cover_url  = EXCLUDED.cover_url,
+                        updated_at = EXCLUDED.updated_at
+                """,
+                    manga_id,
+                    item.get("title", ""),
+                    item.get("title_th"),
+                    item.get("cover_url") or item.get("thumbnail"),
+                    item.get("source_url") or item.get("url"),
+                    item.get("source_site") or item.get("source"),
+                    (item.get("country") or "JP").upper(),
+                    item.get("status", "ongoing"),
+                    item.get("genres") or [],
+                    item.get("description"),
+                    float(item.get("rating") or 0),
+                    int(item.get("view_count") or item.get("views") or 0),
+                    item.get("updated_at"),
+                )
+                inserted += 1
+            except Exception:
+                skipped += 1
 
-        return Response(status_code=403)
+    return {"inserted": inserted, "skipped": skipped, "total": len(catalog)}
 
 
-# 🔧 Debug endpoint - ใช้ตรวจสอบ HTML structure ของเว็บที่โหลดไม่ได้
-@app.get("/api/debug")
-async def debug_page(manga_url: str):
-    async with AsyncSession() as session:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = await session.get(manga_url, headers=headers, impersonate="chrome120", timeout=20)
-        soup = BeautifulSoup(r.text, "html.parser")
+# ─── Health check ────────────────────────────────────────────────────────────
 
-        results = {}
+@app.get("/health")
+async def health():
+    try:
+        async with app.state.pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return {"status": "ok", "db": "connected"}
+    except Exception as e:
+        return JSONResponse({"status": "error", "db": str(e)}, status_code=503)
 
-        for el in soup.find_all(attrs={"data-id": True}):
-            key = f"data-id | {el.name} | class={' '.join(el.get('class', []))}"
-            results[key] = el.get("data-id")
 
-        for el in soup.find_all(attrs={"data-post": True}):
-            key = f"data-post | {el.name} | class={' '.join(el.get('class', []))}"
-            results[key] = el.get("data-post")
-
-        for el in soup.find_all("input", type="hidden"):
-            key = f"input hidden | id={el.get('id', '')} | name={el.get('name', '')}"
-            results[key] = el.get("value", "")
-
-        scripts_with_chapter = []
-        for s in soup.find_all("script"):
-            t = s.string or ""
-            if "chapter" in t.lower() and len(t) > 50:
-                scripts_with_chapter.append(t[:600])
-
-        return {
-            "status": r.status_code,
-            "data_attrs": results,
-            "chapter_scripts_preview": scripts_with_chapter[:3]
-        }
-
+# ─── Run locally ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# ═══════════════════════════════════════════════════
-# 🔍 CATALOG SEARCH API (ต้องรัน aggregator.py ก่อน)
-# ═══════════════════════════════════════════════════
-import os
-from fastapi import Query as QParam
-
-_catalog = []
-
-def _load_catalog():
-    global _catalog
-    if os.path.exists("manga_catalog.json"):
-        with open("manga_catalog.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-            _catalog = data.get("manga", [])
-        logger.info(f"✅ Catalog loaded: {len(_catalog)} titles")
-
-def _normalize(t: str) -> str:
-    import unicodedata
-    t = t.lower().strip()
-    t = unicodedata.normalize("NFKC", t)
-    t = re.sub(r"[^a-z0-9ก-๙\u4e00-\u9fff\uac00-\ud7af\s]", "", t)
-    return t
-
-@app.on_event("startup")
-async def on_startup():
-    _load_catalog()
-
-@app.get("/api/catalog/search")
-async def catalog_search(q: str = QParam(""), limit: int = 50, page: int = 1):
-    if not _catalog:
-        return {"error": "Catalog ว่าง — รัน aggregator.py ก่อนครับ", "total": 0, "results": []}
-    if not q.strip():
-        start = (page - 1) * limit
-        return {"total": len(_catalog), "page": page, "results": _catalog[start:start+limit]}
-    q_n = _normalize(q)
-    results = []
-    for m in _catalog:
-        t_n = _normalize(m["title"])
-        if q_n == t_n:
-            results.insert(0, m)
-        elif q_n in t_n:
-            results.append(m)
-    return {"total": len(results), "query": q, "results": results[:limit]}
-
-@app.get("/api/catalog/stats")
-async def catalog_stats():
-    src = {}
-    multi = sum(1 for m in _catalog if len(m.get("sources", [])) > 1)
-    for m in _catalog:
-        for s in m.get("sources", []):
-            src[s["name"]] = src.get(s["name"], 0) + 1
-    return {"total": len(_catalog), "multi_source": multi,
-            "by_source": dict(sorted(src.items(), key=lambda x: -x[1]))}
-
-@app.get("/api/catalog/reload")
-async def catalog_reload():
-    _load_catalog()
-    return {"ok": True, "total": len(_catalog)}
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
