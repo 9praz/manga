@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+/* คำสั่งปลดล็อกสำหรับ Tailwind v4 ให้ใช้ระบบ Class ได้ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+.dark {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+  transition: background-color 0.5s ease; /* เพิ่มความลื่นไหลเวลาสลับ */
+}
