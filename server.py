@@ -237,21 +237,39 @@ async def scrape_chapter_pages(source_url: str) -> list[str]:
 # ─── Image Proxy ────────────────────────────────────────────────────────────
 
 @app.get("/api/proxy-image")
-async def proxy_image(url: str = Query(...)):
-    """Proxy ภาพเพื่อ bypass hotlink protection"""
-    ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
-            resp = await client.get(url, headers={
-                "Referer": url,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            })
-        ct = resp.headers.get("content-type", "").split(";")[0].strip()
-        if ct not in ALLOWED_CONTENT_TYPES:
-            raise HTTPException(400, "Not an image")
-        return StreamingResponse(iter([resp.content]), media_type=ct)
-    except httpx.RequestError as e:
-        raise HTTPException(502, f"Cannot fetch image: {e}")
+async def proxy_image(url: str):
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    
+    # ถอดรหัส URL ถ้าระบุมาแบบ encode
+    from urllib.parse import unquote, urlparse
+    actual_url = unquote(url)
+    
+    # ดึง domain ต้นทางมาใส่เป็น Referer เพื่อให้เนียนว่าโหลดจากเว็บของเขาเอง
+    parsed_uri = urlparse(actual_url)
+    domain = f"{parsed_uri.scheme}://{parsed_uri.netloc}/"
+    
+    async with httpx.AsyncClient(verify=False) as client:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": domain,
+                "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+            }
+            # follow_redirects=True เพื่อป้องกันเว็บต้นทางเปลี่ยนเส้นทางรูป
+            response = await client.get(actual_url, headers=headers, timeout=10.0, follow_redirects=True)
+            
+            if response.status_code != 200:
+                print(f"Proxy blocked or failed for {actual_url} - Status: {response.status_code}")
+                return Response(status_code=response.status_code)
+            
+            return Response(
+                content=response.content,
+                media_type=response.headers.get("content-type", "image/jpeg")
+            )
+        except Exception as e:
+            print(f"Proxy error for {actual_url}: {e}")
+            return Response(status_code=500)
 
 
 # ─── Migration: catalog.json → PostgreSQL ───────────────────────────────────
