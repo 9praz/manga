@@ -253,6 +253,12 @@ async def migrate_from_json(secret: str = Query(...), clear: bool = False):
             cover_img = item.get("cover") or item.get("cover_url") or item.get("thumbnail")
             desc_text = item.get("desc") or item.get("description")
             
+            genres = item.get("genres") or []
+            exclude_genres = ['Harem', 'Adult', 'Smut', 'Ecchi', 'Mature']
+            if any(g in exclude_genres for g in genres):
+                skipped += 1
+                continue
+            
             try:
                 await conn.execute("""
                     INSERT INTO manga (
@@ -276,7 +282,7 @@ async def migrate_from_json(secret: str = Query(...), clear: bool = False):
                     source_site,
                     (item.get("country") or "JP").upper(),
                     item.get("status", "ongoing"),
-                    item.get("genres") or [],
+                    genres,
                     desc_text,
                     float(item.get("rating") or 0),
                     int(item.get("view_count") or item.get("views") or 0),
