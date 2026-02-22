@@ -38,7 +38,7 @@ app.add_middleware(
 
 async def init_db(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
-        # สร้าง Table พื้นฐาน
+        # 1. สร้าง Table พื้นฐาน
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS manga (
                 id          TEXT PRIMARY KEY,
@@ -56,15 +56,16 @@ async def init_db(pool: asyncpg.Pool):
                 updated_at  TIMESTAMPTZ,
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             );
-            
-            -- ตรวจสอบและเพิ่มคอลัมน์ sort_order ถ้ายังไม่มี (กัน Error 500)
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='manga' AND column_name='sort_order') THEN
-                    ALTER TABLE manga ADD COLUMN sort_order INTEGER;
-                END IF;
-            END $$;
+        """)
+        
+        # 2. ตรวจสอบและเพิ่มคอลัมน์ sort_order (ถ้าไม่มี) เพื่อจัดลำดับความฮิต
+        cols = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name = 'manga'")
+        col_names = [c['column_name'] for c in cols]
+        if 'sort_order' not in col_names:
+            await conn.execute("ALTER TABLE manga ADD COLUMN sort_order INTEGER;")
 
+        # 3. สร้าง Table ตอน (Chapters)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS chapters (
                 id          TEXT PRIMARY KEY,
                 manga_id    TEXT REFERENCES manga(id) ON DELETE CASCADE,
@@ -105,7 +106,7 @@ async def list_manga(
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     
     params += [limit, offset]
-    # เรียงตาม sort_order ที่ aggregator จัดมาให้
+    # เรียงตามลำดับความฮิตที่ Aggregator จัดลำดับมาให้ในไฟล์ JSON
     query = f"""
         SELECT * FROM manga {where} 
         ORDER BY sort_order ASC NULLS LAST, created_at DESC
@@ -139,14 +140,14 @@ async def get_pages(chapter_id: str):
         if not row: raise HTTPException(404)
         if row["pages"]: return {"pages": row["pages"]}
         
-        pages = await fetch_pages_logic(row["source_url"])
+        # ระบบดึงรูปจากต้นทาง (Nekopost)
+        pages = await fetch_pages_from_source(row["source_url"])
         if pages:
             await conn.execute("UPDATE chapters SET pages = $1 WHERE id = $2", pages, chapter_id)
         return {"pages": pages}
 
-async def fetch_pages_logic(url: str) -> list[str]:
+async def fetch_pages_from_source(url: str) -> list[str]:
     try:
-        # ดึงรูปจาก Nekopost โดยใช้ ID จาก URL
         if "nekopost.net" in url:
             parts = url.strip("/").split("/")
             m_id, c_id = parts[-2], parts[-1]
@@ -172,17 +173,14 @@ async def proxy_image(url: str):
 async def migrate(secret: str = Query(...), clear: bool = False):
     if secret != os.getenv("MIGRATE_SECRET", "changeme"): raise HTTPException(403)
     
-    # ลองหาไฟล์ JSON ในหลายๆ ที่เผื่อตำแหน่งเพี้ยน
-    possible_paths = [
-        Path(__file__).parent / "manga_catalog.json",
-        Path(__file__).parent / "public" / "manga_catalog.json"
-    ]
-    path = next((p for p in possible_paths if p.exists()), None)
+    # ค้นหาไฟล์ JSON ในโฟลเดอร์ปัจจุบัน
+    possible_paths = [Path("manga_catalog.json"), Path("public/manga_catalog.json"), Path(__file__).parent / "manga_catalog.json"]
+    json_path = next((p for p in possible_paths if p.exists()), None)
     
-    if not path:
-        raise HTTPException(404, detail="manga_catalog.json not found on server")
+    if not json_path:
+        raise HTTPException(404, detail="manga_catalog.json not found on server. Did you git push it?")
 
-    with open(path, encoding="utf-8") as f:
+    with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
         catalog = data.get("manga", [])
     
@@ -195,7 +193,7 @@ async def migrate(secret: str = Query(...), clear: bool = False):
             try:
                 first_src = item.get("sources", [{}])[0]
                 s_url = item.get("url") or first_src.get("url", "")
-                m_id = item.get("id") or make_id(s_url or item.get("title"))
+                m_id = item.get("id") or make_id(s_url or item.get("title", ""))
                 
                 await conn.execute("""
                     INSERT INTO manga (id, title, title_th, cover_url, source_url, source_site, country, genres, description, sort_order)
@@ -203,12 +201,12 @@ async def migrate(secret: str = Query(...), clear: bool = False):
                     ON CONFLICT (id) DO UPDATE SET 
                         sort_order = EXCLUDED.sort_order, 
                         cover_url = EXCLUDED.cover_url,
-                        description = EXCLUDED.description
+                        description = EXCLUDED.description,
+                        genres = EXCLUDED.genres
                 """, m_id, item.get("title"), item.get("title_th"), item.get("cover"), s_url, first_src.get("name"), 
                    item.get("country", "JP"), item.get("genres", []), item.get("desc"), idx)
                 inserted += 1
-            except Exception as e:
-                print(f"Error migrating {item.get('title')}: {e}")
+            except Exception: continue
                 
     return {"status": "success", "inserted": inserted, "total": len(catalog)}
 

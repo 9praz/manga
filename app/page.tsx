@@ -6,39 +6,30 @@ import {
   BookOpen, ExternalLink, Flame, RefreshCw
 } from 'lucide-react';
 
-// ─────────────────────────────────────────────────────────
-// Config — เปลี่ยน URL ตรงนี้ที่เดียว
-// ─────────────────────────────────────────────────────────
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://manga-production-6994.up.railway.app";
 
-// ─────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────
 interface Source  { name: string; url: string; }
 interface Manga   {
   id: string;
   title: string;
-  cover: string;       // mapped จาก cover_url
+  cover: string;
   genres: string[];
-  desc?: string;       // mapped จาก description
+  desc?: string;
   country?: string;
-  sources: Source[];   // mapped จาก source_url + source_site
+  sources: Source[];
   rating?: number;
   view_count?: number;
 }
 interface Chapter { id: string; title: string; url: string; number: number; }
 
-// ─────────────────────────────────────────────────────────
-// Map API response → Manga type
-// ─────────────────────────────────────────────────────────
 function mapManga(item: any): Manga {
   return {
     id:      item.id,
     title:   item.title,
-    cover:   item.cover_url || item.cover || "",
+    cover:   item.cover_url || item.cover || item.image_url || item.image || item.thumbnail || item.thumb || "",
     genres:  item.genres || [],
-    desc:    item.description || item.desc,
-    country: item.country,
+    desc:    item.description || item.desc || "",
+    country: item.country || "",
     sources: item.source_url
       ? [{ name: item.source_site || "Source", url: item.source_url }]
       : (item.sources || []),
@@ -47,18 +38,11 @@ function mapManga(item: any): Manga {
   };
 }
 
-// ─────────────────────────────────────────────────────────
-// Cover proxy — รูปทุกใบต้องผ่าน /api/proxy-image
-// ─────────────────────────────────────────────────────────
-function proxyCover(url: string): string {
-  if (!url) return '';
-  if (url.startsWith('/api/proxy-image')) return url;
-  return `/api/proxy-image?url=${encodeURIComponent(url)}`;
+function proxyCover(url: string): string | undefined {
+  if (!url) return undefined;
+  return url; 
 }
 
-// ─────────────────────────────────────────────────────────
-// Chapter fetcher — ดึงจาก Railway API
-// ─────────────────────────────────────────────────────────
 async function fetchChapters(manga: Manga): Promise<Chapter[]> {
   try {
     const res = await fetch(`${API_BASE}/api/manga/${manga.id}/chapters`,
@@ -76,9 +60,6 @@ async function fetchChapters(manga: Manga): Promise<Chapter[]> {
   return [];
 }
 
-// ─────────────────────────────────────────────────────────
-// Country labels
-// ─────────────────────────────────────────────────────────
 const COUNTRY_LABEL: Record<string, string> = {
   JP: "🇯🇵 มังงะญี่ปุ่น",
   KR: "🇰🇷 มังงะเกาหลี",
@@ -92,9 +73,6 @@ const COUNTRY_LABEL_EN: Record<string, string> = {
   OTHER: "🌐 Other",
 };
 
-// ─────────────────────────────────────────────────────────
-// UI Text
-// ─────────────────────────────────────────────────────────
 const T = {
   th: {
     readNow:"อ่านตอนนี้", genres:"หมวดหมู่", all:"ทั้งหมด",
@@ -130,9 +108,6 @@ const T = {
   },
 };
 
-// ─────────────────────────────────────────────────────────
-// Banner
-// ─────────────────────────────────────────────────────────
 const BannerSlider = memo(({ items, onOpen, t }: {
   items: Manga[], onOpen: (m: Manga) => void, t: typeof T.th
 }) => {
@@ -194,14 +169,11 @@ const BannerSlider = memo(({ items, onOpen, t }: {
 });
 BannerSlider.displayName = 'BannerSlider';
 
-// ─────────────────────────────────────────────────────────
-// MangaCard
-// ─────────────────────────────────────────────────────────
 const COUNTRY_FLAG: Record<string,string> = { JP:"🇯🇵", KR:"🇰🇷", CN:"🇨🇳", OTHER:"🌐" };
 
 const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void }) => {
   const [err, setErr] = useState(false);
-  const src = err
+  const src = err || !m.cover
     ? `https://placehold.co/300x420/111827/3b82f6?text=${encodeURIComponent(m.title.slice(0,12))}`
     : proxyCover(m.cover);
 
@@ -209,6 +181,7 @@ const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void })
     <div onClick={() => onOpen(m)} className="group cursor-pointer select-none">
       <div className="relative aspect-[2/3] rounded-xl overflow-hidden bg-zinc-800 transition-transform duration-300 group-hover:scale-95 ring-1 ring-transparent group-hover:ring-blue-500/40">
         <img src={src} alt={m.title} loading="lazy"
+          referrerPolicy="no-referrer"
           className="w-full h-full object-cover"
           onError={() => setErr(true)} />
         <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -228,19 +201,17 @@ const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void })
 });
 MangaCard.displayName = 'MangaCard';
 
-// ─────────────────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────────────────
 const PER_PAGE = 24;
 
-// ดึง genre list จาก API (distinct genres จาก DB)
 async function fetchGenres(): Promise<string[]> {
   try {
-    // ดึง manga ชุดแรกแล้วรวม genres (fallback ง่ายๆ)
     const res = await fetch(`${API_BASE}/api/manga?limit=100`);
     const data = await res.json();
     const set = new Set<string>();
-    (data.data || []).forEach((m: any) => (m.genres || []).forEach((g: string) => set.add(g)));
+    const exclude = ['Harem', 'Adult', 'Smut', 'Ecchi', 'Mature'];
+    (data.data || []).forEach((m: any) => (m.genres || []).forEach((g: string) => {
+      if (!exclude.includes(g)) set.add(g);
+    }));
     return Array.from(set).sort();
   } catch { return []; }
 }
@@ -270,19 +241,16 @@ export default function HomePage() {
   const listRef = useRef<HTMLDivElement>(null);
   const t = T[lang];
 
-  // Theme
   useEffect(() => {
     const d = localStorage.getItem('manga-theme') !== 'light';
     setDark(d);
     document.documentElement.classList.toggle('dark', d);
   }, []);
 
-  // โหลด genres ครั้งเดียว
   useEffect(() => {
     fetchGenres().then(setGenres);
   }, []);
 
-  // โหลด manga จาก API เมื่อ filter/page เปลี่ยน
   useEffect(() => {
     setLoading(true);
     const params = new URLSearchParams({
@@ -300,11 +268,15 @@ export default function HomePage() {
         return r.json();
       })
       .then(data => {
-        const mapped = (data.data || []).map(mapManga);
+        const exclude = ['Harem', 'Adult', 'Smut', 'Ecchi', 'Mature'];
+        const mapped = (data.data || [])
+          .map(mapManga)
+          .filter((m: Manga) => !m.genres.some(g => exclude.includes(g)));
+
         setMangas(mapped);
         setTotal(data.total || 0);
         setTotalPages(Math.max(1, Math.ceil((data.total || 0) / PER_PAGE)));
-        // Banner = 5 รายการแรกที่มีรูปและ desc
+        
         if (page === 1 && !genre && !countryFilter && !query) {
           const b = mapped.filter((m: Manga) => m.cover && m.desc).slice(0, 5);
           setBanner(b.length ? b : mapped.filter((m: Manga) => m.cover).slice(0, 5));
@@ -315,7 +287,6 @@ export default function HomePage() {
       .finally(() => setLoading(false));
   }, [page, genre, countryFilter, query]);
 
-  // Modal scroll lock
   useEffect(() => {
     document.body.style.overflow = mOpen ? 'hidden' : '';
     return () => { document.body.style.overflow = ''; };
@@ -338,7 +309,6 @@ export default function HomePage() {
     return Array.from({ length: Math.max(0, e-s+1) }, (_,i) => s+i);
   };
 
-  // ─── Loading / Error
   if (loading && mangas.length === 0) return (
     <div className="fixed inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] gap-3">
       <Loader2 className="w-7 h-7 text-blue-600 animate-spin"/>
@@ -360,7 +330,6 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-white dark:bg-[#0a0a0a] text-zinc-900 dark:text-zinc-100 pb-16">
 
-      {/* ═══ MODAL ═══ */}
       {mOpen && mManga && (
         <div className="fixed inset-0 z-[200] flex items-end md:items-center justify-center bg-black/85"
           onClick={e => { if (e.target===e.currentTarget) setMOpen(false); }}>
@@ -370,7 +339,6 @@ export default function HomePage() {
               <X size={16}/>
             </button>
 
-            {/* Hero */}
             <div className="relative h-36 md:h-44 shrink-0 overflow-hidden">
               <img src={proxyCover(mManga.cover)} className="w-full h-full object-cover blur-2xl scale-110 opacity-20 absolute inset-0" alt=""/>
               <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#0d0d0d] to-transparent"/>
@@ -385,7 +353,6 @@ export default function HomePage() {
             <div className="flex-1 overflow-y-auto pt-14 md:pt-18 pb-8 px-6 md:px-10">
               <div className="flex flex-col md:flex-row gap-6 md:gap-8">
 
-                {/* Left */}
                 <div className="flex-1 min-w-0 space-y-4">
                   <div>
                     <div className="flex items-center gap-2 mb-1.5">
@@ -418,7 +385,6 @@ export default function HomePage() {
                   </div>
                 </div>
 
-                {/* Right — Chapter list */}
                 <div className="w-full md:w-60 shrink-0">
                   {mLoading ? (
                     <div className="flex flex-col items-center justify-center py-10 gap-3 border border-zinc-200 dark:border-zinc-800 rounded-xl bg-zinc-50 dark:bg-zinc-900/50">
@@ -481,7 +447,6 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* ═══ HEADER ═══ */}
       <header className="sticky top-0 z-50 px-4 md:px-6 py-3 bg-white/90 dark:bg-[#0a0a0a]/90 backdrop-blur-xl border-b border-zinc-100 dark:border-zinc-900">
         <div className="max-w-7xl mx-auto flex items-center gap-3">
           <h1 className="text-lg font-black italic text-blue-600 tracking-tight uppercase shrink-0">MANGA.BLUE</h1>
@@ -510,12 +475,10 @@ export default function HomePage() {
       </header>
 
       <main className="mt-6 space-y-7">
-        {/* Banner */}
         {!query && !genre && !countryFilter && page===1 && (
           <BannerSlider items={banner} onOpen={openModal} t={t}/>
         )}
 
-        {/* ═══ Country filter tabs ═══ */}
         <section className="px-4 md:px-6 max-w-7xl mx-auto">
           <p className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mb-2">{t.country}</p>
           <div className="flex gap-1.5 overflow-x-auto pb-1" style={{scrollbarWidth:'none'}}>
@@ -529,7 +492,6 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ═══ Genre filter ═══ */}
         <section className="px-4 md:px-6 max-w-7xl mx-auto" ref={listRef}>
           <p className="text-[9px] font-black uppercase tracking-widest text-zinc-400 mb-2">{t.genres}</p>
           <div className="flex gap-1.5 overflow-x-auto pb-1" style={{scrollbarWidth:'none'}}>
@@ -548,7 +510,6 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* ═══ Grid ═══ */}
         <section className="px-4 md:px-6 max-w-7xl mx-auto">
           <div className="flex items-center gap-2 mb-4">
             <Flame size={14} className="text-orange-500 animate-pulse"/>
