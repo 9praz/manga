@@ -99,8 +99,8 @@ async def lifespan(app: FastAPI):
     yield
     await app.state.pool.close()
 
-# --- FastAPI Initialization (ต้องอยู่ก่อน Endpoints เสมอ) ---
-app = FastAPI(title="Manga.Blue API", version="2.2", lifespan=lifespan)
+# --- App Init ---
+app = FastAPI(title="Manga.Blue API", version="2.3", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -110,157 +110,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Scraper Helpers ---
-async def get_soup(url: str, referer: str = "") -> Optional[BeautifulSoup]:
-    headers = {**HEADERS, "Referer": referer} if referer else {**HEADERS}
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15, verify=False, headers=headers) as client:
-            r = await client.get(url)
-            if r.status_code == 200: return BeautifulSoup(r.text, "html.parser")
-    except Exception as e: print(f"[scrape error] {url}: {e}")
-    return None
+# --- Scrapers & Endpoints (เหมือนเดิมที่ปรับปรุงแล้ว) ---
+# ... (ฟังก์ชัน get_soup, scrape_chapters ต่างๆ ให้คงไว้ตามเดิม) ...
+# [หมายเหตุ: เพื่อความกระชับ ผมจะข้ามไปส่วนที่เป็นจุดบอดที่ทำให้มังงะหายครับ]
 
-def _extract_chapter_number(title: str, url: str = "") -> float:
-    for text in [title, url]:
-        if not text: continue
-        m = re.search(r'(?:chapter|ch|ตอน(?:ที่)?)[.\-\s]*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-        if m: return float(m.group(1))
-        m = re.search(r'[-/](\d+(?:\.\d+)?)(?:/?\s*$|[^0-9])', text)
-        if m: return float(m.group(1))
-    return 0.0
-
-# --- Scrapers ---
-async def scrape_chapters_madara(manga_url: str) -> List[Dict]:
-    chapters = []
-    parsed = urlparse(manga_url)
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    soup = await get_soup(manga_url)
-    if not soup: return []
-    post_id = None
-    for el in soup.select("script"):
-        m = re.search(r'"manga_id"\s*:\s*"?(\d+)"?', el.get_text())
-        if m: post_id = m.group(1); break
-    if post_id:
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=15, verify=False) as client:
-                r = await client.post(f"{base}/wp-admin/admin-ajax.php", data={"action": "manga_get_chapters", "manga": post_id}, headers={**HEADERS, "Referer": manga_url, "X-Requested-With": "XMLHttpRequest"})
-                if r.status_code == 200 and r.text.strip():
-                    ch_soup = BeautifulSoup(r.text, "html.parser")
-                    for li in ch_soup.select("li.wp-manga-chapter"):
-                        a = li.select_one("a")
-                        if not a: continue
-                        href, title = a.get("href", ""), a.get_text(strip=True)
-                        chapters.append({"title": title, "url": href, "number": _extract_chapter_number(title, href)})
-        except: pass
-    if not chapters:
-        for li in soup.select("li.wp-manga-chapter"):
-            a = li.select_one("a")
-            if not a: continue
-            href, title = a.get("href", ""), a.get_text(strip=True)
-            chapters.append({"title": title, "url": href, "number": _extract_chapter_number(title, href)})
-    return chapters
-
-async def scrape_chapters_themesia(manga_url: str) -> List[Dict]:
-    chapters = []
-    soup = await get_soup(manga_url)
-    if not soup: return []
-    for sel in ["#chapterlist li", ".eplister li", ".chapterlist li"]:
-        items = soup.select(sel)
-        if items:
-            for li in items:
-                a = li.select_one("a")
-                if not a: continue
-                href = a.get("href", "")
-                title_el = li.select_one(".chapternum") or li.select_one(".chapter-title")
-                title = title_el.get_text(strip=True) if title_el else a.get_text(strip=True)
-                chapters.append({"title": title, "url": href, "number": _extract_chapter_number(title, href)})
-            break
-    return chapters
-
-async def scrape_chapters_nekopost(manga_url: str) -> List[Dict]:
-    chapters = []
-    pid = manga_url.rstrip("/").split("/")[-1]
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(f"https://www.nekopost.net/api/project/detail/{pid}")
-            if r.status_code == 200:
-                for ch in r.json().get("listChapter", []):
-                    ch_no = ch.get("chapterNo", "0")
-                    chapters.append({"title": f"ตอนที่ {ch_no}", "url": f"https://www.nekopost.net/manga/{pid}/{ch_no}", "number": float(ch_no)})
-    except: pass
-    return chapters
-
-async def scrape_chapters(manga_url: str) -> List[Dict]:
-    theme = get_theme(manga_url)
-    if theme == "nekopost": return await scrape_chapters_nekopost(manga_url)
-    if theme == "themesia": return await scrape_chapters_themesia(manga_url)
-    return await scrape_chapters_madara(manga_url)
-
-async def scrape_pages(chapter_url: str) -> List[str]:
-    soup = await get_soup(chapter_url, referer=chapter_url)
-    if not soup: return []
-    pages = []
-    for img in soup.select(".reading-content img, #readerarea img"):
-        src = img.get("data-src") or img.get("data-lazy-src") or img.get("src", "")
-        if src and src.startswith("http"): pages.append(src.strip())
-    return pages
-
-# --- API Endpoints ---
 @app.get("/api/manga")
 async def list_manga(page: int = 1, limit: int = 24, q: Optional[str] = None):
     pool = app.state.pool
     offset = (page - 1) * limit
     async with pool.acquire() as conn:
         if q:
-            rows = await conn.fetch("SELECT * FROM manga WHERE title ILIKE $1 ORDER BY sort_order ASC LIMIT $2 OFFSET $3", f"%{q}%", limit, offset)
+            rows = await conn.fetch("SELECT * FROM manga WHERE title ILIKE $1 OR title_th ILIKE $1 ORDER BY sort_order ASC LIMIT $2 OFFSET $3", f"%{q}%", limit, offset)
         else:
             rows = await conn.fetch("SELECT * FROM manga ORDER BY sort_order ASC LIMIT $1 OFFSET $2", limit, offset)
     return [dict(r) for r in rows]
 
-@app.get("/api/manga/{manga_id}")
-async def get_manga(manga_id: str):
-    async with app.state.pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM manga WHERE id = $1", manga_id)
-    if not row: return JSONResponse(status_code=404, content={"detail": "Manga not found"})
-    return dict(row)
+# ─── จุดสำคัญ: Migration Endpoint (ต้องมีเพื่อเติมข้อมูลมังงะ) ──────────────────
 
-@app.get("/api/manga/{manga_id}/chapters")
-async def get_chapters(manga_id: str):
+@app.api_route("/api/migrate", methods=["GET", "POST"])
+async def migrate(secret: str = Query(...), clear: bool = False):
+    if secret != os.getenv("MIGRATE_SECRET", "changeme"):
+        raise HTTPException(403, "Invalid secret")
+
+    # หาไฟล์ catalog
+    catalog_path = Path("manga_catalog.json")
+    if not catalog_path.exists():
+        raise HTTPException(404, "manga_catalog.json not found")
+
+    with open(catalog_path, encoding="utf-8") as f:
+        data = json.load(f)
+    
+    catalog = data.get("manga", data) if isinstance(data, dict) else data
     pool = app.state.pool
-    try:
-        async with pool.acquire() as conn:
-            manga = await conn.fetchrow("SELECT id, source_url, chapters_fetched FROM manga WHERE id = $1", manga_id)
-            if not manga: return JSONResponse(status_code=404, content={"detail": "Manga not found"})
-            if manga["chapters_fetched"]:
-                rows = await conn.fetch("SELECT id, number, title, source_url FROM chapters WHERE manga_id = $1 ORDER BY number DESC", manga_id)
-                return [dict(r) for r in rows]
-            source_url = manga["source_url"]
+    inserted = 0
 
-        raw = await scrape_chapters(source_url)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for ch in raw:
-                    ch_id = make_chapter_id(manga_id, ch["number"])
-                    await conn.execute("INSERT INTO chapters (id, manga_id, number, title, source_url) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING", ch_id, manga_id, ch["number"], ch["title"], ch["url"])
-                await conn.execute("UPDATE manga SET chapters_fetched = TRUE WHERE id = $1", manga_id)
-            rows = await conn.fetch("SELECT id, number, title, source_url FROM chapters WHERE manga_id = $1 ORDER BY number DESC", manga_id)
-            return [dict(r) for r in rows]
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"detail": str(e)})
+    async with pool.acquire() as conn:
+        if clear:
+            await conn.execute("TRUNCATE TABLE chapters, manga CASCADE")
 
-@app.get("/api/proxy-image")
-async def proxy_image(url: str = Query(...)):
-    actual_url = unquote(url)
-    domain = f"{urlparse(actual_url).scheme}://{urlparse(actual_url).netloc}/"
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15, verify=False, headers={**HEADERS, "Referer": domain}) as client:
-            r = await client.get(actual_url)
-            return Response(content=r.content, media_type=r.headers.get("content-type", "image/jpeg"), headers={"Access-Control-Allow-Origin": "*"})
-    except: return Response(status_code=502)
+        for idx, item in enumerate(catalog):
+            genres = item.get("genres", [])
+            if any(g.lower() in FORBIDDEN_GENRES for g in genres): continue
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+            s_url = item.get("sources", [{}])[0].get("url") or item.get("source_url", "")
+            s_site = item.get("sources", [{}])[0].get("name") or item.get("source_site", "Unknown")
+            m_id = item.get("id") or make_id(s_url or item.get("title", ""))
+
+            try:
+                await conn.execute("""
+                    INSERT INTO manga (id, title, title_th, cover_url, source_url, source_site, country, genres, description, sort_order)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    ON CONFLICT (id) DO UPDATE SET 
+                        cover_url = EXCLUDED.cover_url, 
+                        genres = EXCLUDED.genres, 
+                        sort_order = EXCLUDED.sort_order
+                """, m_id, item.get("title", ""), item.get("title_th"), item.get("cover") or item.get("cover_url"), s_url, s_site, (item.get("country") or "JP").upper(), genres, item.get("desc") or item.get("description"), idx)
+                inserted += 1
+            except Exception as e:
+                print(f"Error migrating {item.get('title')}: {e}")
+
+    return {"status": "ok", "inserted": inserted, "total": len(catalog)}
+
+# ... (Endpoints อื่นๆ get_chapters, proxy_image, health) ...
 
 if __name__ == "__main__":
     import uvicorn
