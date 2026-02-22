@@ -38,6 +38,7 @@ app.add_middleware(
 
 async def init_db(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
+        # สร้าง Table พื้นฐาน
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS manga (
                 id          TEXT PRIMARY KEY,
@@ -52,10 +53,17 @@ async def init_db(pool: asyncpg.Pool):
                 description TEXT,
                 rating      FLOAT DEFAULT 0,
                 view_count  BIGINT DEFAULT 0,
-                sort_order  SERIAL,
                 updated_at  TIMESTAMPTZ,
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             );
+            
+            -- ตรวจสอบและเพิ่มคอลัมน์ sort_order ถ้ายังไม่มี (กัน Error 500)
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='manga' AND column_name='sort_order') THEN
+                    ALTER TABLE manga ADD COLUMN sort_order INTEGER;
+                END IF;
+            END $$;
 
             CREATE TABLE IF NOT EXISTS chapters (
                 id          TEXT PRIMARY KEY,
@@ -97,9 +105,10 @@ async def list_manga(
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     
     params += [limit, offset]
+    # เรียงตาม sort_order ที่ aggregator จัดมาให้
     query = f"""
         SELECT * FROM manga {where} 
-        ORDER BY sort_order ASC 
+        ORDER BY sort_order ASC NULLS LAST, created_at DESC
         LIMIT ${len(params)-1} OFFSET ${len(params)}
     """
     
@@ -137,6 +146,7 @@ async def get_pages(chapter_id: str):
 
 async def fetch_pages_logic(url: str) -> list[str]:
     try:
+        # ดึงรูปจาก Nekopost โดยใช้ ID จาก URL
         if "nekopost.net" in url:
             parts = url.strip("/").split("/")
             m_id, c_id = parts[-2], parts[-1]
@@ -161,7 +171,17 @@ async def proxy_image(url: str):
 @app.api_route("/api/migrate", methods=["GET", "POST"])
 async def migrate(secret: str = Query(...), clear: bool = False):
     if secret != os.getenv("MIGRATE_SECRET", "changeme"): raise HTTPException(403)
-    path = Path(__file__).parent / "public" / "manga_catalog.json"
+    
+    # ลองหาไฟล์ JSON ในหลายๆ ที่เผื่อตำแหน่งเพี้ยน
+    possible_paths = [
+        Path(__file__).parent / "manga_catalog.json",
+        Path(__file__).parent / "public" / "manga_catalog.json"
+    ]
+    path = next((p for p in possible_paths if p.exists()), None)
+    
+    if not path:
+        raise HTTPException(404, detail="manga_catalog.json not found on server")
+
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
         catalog = data.get("manga", [])
@@ -170,18 +190,27 @@ async def migrate(secret: str = Query(...), clear: bool = False):
     async with pool.acquire() as conn:
         if clear: await conn.execute("TRUNCATE TABLE chapters, manga CASCADE;")
         
+        inserted = 0
         for idx, item in enumerate(catalog):
-            first_src = item.get("sources", [{}])[0]
-            s_url = item.get("url") or first_src.get("url", "")
-            m_id = item.get("id") or make_id(s_url or item.get("title"))
-            
-            await conn.execute("""
-                INSERT INTO manga (id, title, title_th, cover_url, source_url, source_site, country, genres, description, sort_order)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                ON CONFLICT (id) DO UPDATE SET sort_order = EXCLUDED.sort_order, cover_url = EXCLUDED.cover_url
-            """, m_id, item.get("title"), item.get("title_th"), item.get("cover"), s_url, first_src.get("name"), 
-               item.get("country", "JP"), item.get("genres", []), item.get("desc"), idx)
-    return {"status": "success", "total": len(catalog)}
+            try:
+                first_src = item.get("sources", [{}])[0]
+                s_url = item.get("url") or first_src.get("url", "")
+                m_id = item.get("id") or make_id(s_url or item.get("title"))
+                
+                await conn.execute("""
+                    INSERT INTO manga (id, title, title_th, cover_url, source_url, source_site, country, genres, description, sort_order)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    ON CONFLICT (id) DO UPDATE SET 
+                        sort_order = EXCLUDED.sort_order, 
+                        cover_url = EXCLUDED.cover_url,
+                        description = EXCLUDED.description
+                """, m_id, item.get("title"), item.get("title_th"), item.get("cover"), s_url, first_src.get("name"), 
+                   item.get("country", "JP"), item.get("genres", []), item.get("desc"), idx)
+                inserted += 1
+            except Exception as e:
+                print(f"Error migrating {item.get('title')}: {e}")
+                
+    return {"status": "success", "inserted": inserted, "total": len(catalog)}
 
 if __name__ == "__main__":
     import uvicorn
