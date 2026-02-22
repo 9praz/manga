@@ -271,8 +271,9 @@ async def migrate_from_json(secret: str = Query(...)):
         raise HTTPException(404, "manga_catalog.json not found")
 
     with open(catalog_path) as f:
-        catalog: list[dict] = json.load(f)
-
+        data = json.load(f)
+        catalog: list[dict] = data.get("manga") or data.get("items") or data.get("results") or data
+        
     pool: asyncpg.Pool = app.state.pool
     inserted = 0
     skipped  = 0
