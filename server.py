@@ -114,6 +114,19 @@ async def init_db(pool: asyncpg.Pool):
             CREATE INDEX IF NOT EXISTS idx_manga_views    ON manga(view_count DESC);
             CREATE INDEX IF NOT EXISTS idx_chapters_manga ON chapters(manga_id, number DESC);
         """)
+        # Migration: เพิ่ม column ที่อาจหายไปใน schema เก่า
+        migrations = [
+            "ALTER TABLE manga    ADD COLUMN IF NOT EXISTS chapters_fetched BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE manga    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+            "ALTER TABLE chapters ADD COLUMN IF NOT EXISTS pages_fetched BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE chapters ADD COLUMN IF NOT EXISTS pages TEXT[]",
+            "ALTER TABLE chapters ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
+        ]
+        for sql in migrations:
+            try:
+                await conn.execute(sql)
+            except Exception:
+                pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
