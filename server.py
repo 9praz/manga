@@ -384,6 +384,18 @@ async def scrape_pages_nekopost(client: httpx.AsyncClient, chapter_url: str) -> 
 # Routes
 # ─────────────────────────────────────────────────────────
 
+@app.get("/api/reset-pages-cache")
+async def reset_pages_cache(secret: str = Query(...)):
+    """Reset pages_fetched ทั้งหมด เพื่อ force re-scrape ครั้งถัดไป"""
+    if secret != os.getenv("MIGRATE_SECRET", "changeme"):
+        raise HTTPException(403, "Invalid secret")
+    async with app.state.pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE chapters SET pages_fetched = FALSE, pages = NULL WHERE pages_fetched = TRUE"
+        )
+    return {"status": "ok", "message": "Pages cache cleared — will re-scrape on next request"}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "3.0"}
@@ -489,7 +501,7 @@ async def get_chapters(manga_id: str):
 
 
 @app.get("/api/chapters/{chapter_id}/pages")
-async def get_pages(chapter_id: str):
+async def get_pages(chapter_id: str, force: bool = False):
     pool = app.state.pool
 
     async with pool.acquire() as conn:
@@ -497,8 +509,8 @@ async def get_pages(chapter_id: str):
         if not chapter:
             raise HTTPException(404, "Chapter not found")
 
-        # ถ้า scrape แล้ว คืนจาก DB เลย
-        if chapter['pages_fetched'] and chapter['pages']:
+        # ถ้า scrape แล้วและไม่ได้ force → คืนจาก DB เลย
+        if chapter['pages_fetched'] and chapter['pages'] and not force:
             return {"pages": list(chapter['pages'])}
 
     # Scrape on-demand
