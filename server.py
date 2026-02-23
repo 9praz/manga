@@ -59,6 +59,48 @@ def make_id(text: str) -> str:
 def make_chapter_id(manga_id: str, number: float) -> str:
     return hashlib.md5(f"{manga_id}_{number}".encode()).hexdigest()[:16]
 
+AD_DOMAINS = {
+    "manga-bl.com", "manga-bh.com", "manga-kr.com", "readmangathai.com",
+    "doodmanga.net", "i.facebook.com", "fb.com", "google.com",
+    "line.me", "bit.ly", "goo.gl", "shorturl.at",
+}
+
+def filter_ad_images(images: list, chapter_url: str) -> list:
+    """กรองรูปโฆษณาที่มาจาก domain อื่น หรือ domain ที่รู้ว่าเป็น ad"""
+    if not images:
+        return images
+    try:
+        chapter_host = urlparse(chapter_url).netloc.lower().replace("www.", "")
+    except Exception:
+        return images
+
+    filtered = []
+    for img in images:
+        try:
+            img_host = urlparse(img).netloc.lower().replace("www.", "")
+            # ตัดออกถ้าเป็น ad domain ที่รู้จัก
+            if any(ad in img_host for ad in AD_DOMAINS):
+                continue
+            # เก็บถ้า: domain เดียวกัน, CDN, หรือ osemocphoto (nekopost)
+            if (img_host == chapter_host
+                    or "cdn" in img_host
+                    or "osemocphoto" in img_host
+                    or "img" in img_host
+                    or "image" in img_host
+                    or "storage" in img_host
+                    or "static" in img_host):
+                filtered.append(img)
+            # ถ้าไม่แน่ใจแต่ chapter มาจาก domain เดียวกับ img → เก็บ
+            else:
+                # เก็บถ้าไม่ใช่ domain ต่างออกไปชัดเจน
+                filtered.append(img)
+        except Exception:
+            filtered.append(img)
+
+    # ถ้ากรองหมดเลยให้ return ต้นฉบับ (ป้องกัน edge case)
+    return filtered if filtered else images
+
+
 def extract_chapter_number(text: str, url: str = "") -> float:
     for pattern in [
         r'(?:chapter|ch|chap|ep|ตอนที่|ตอน)[.\s\-_]*(\d+(?:\.\d+)?)',
@@ -220,7 +262,7 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
             if src and 'data:image' not in src and src.startswith('http'):
                 images.append(src)
 
-        return images
+        return filter_ad_images(images, chapter_url)
     except Exception:
         return []
 
