@@ -59,46 +59,48 @@ def make_id(text: str) -> str:
 def make_chapter_id(manga_id: str, number: float) -> str:
     return hashlib.md5(f"{manga_id}_{number}".encode()).hexdigest()[:16]
 
-AD_DOMAINS = {
-    "manga-bl.com", "manga-bh.com", "manga-kr.com", "readmangathai.com",
-    "doodmanga.net", "i.facebook.com", "fb.com", "google.com",
-    "line.me", "bit.ly", "goo.gl", "shorturl.at",
+AD_URL_KEYWORDS = {
+    "manga-bl", "manga-bh", "manga-kr", "readmangathai",
+    "banner", "advertis", "sponsor", "promo", "adsense",
 }
 
-def filter_ad_images(images: list, chapter_url: str) -> list:
-    """กรองรูปโฆษณาที่มาจาก domain อื่น หรือ domain ที่รู้ว่าเป็น ad"""
-    if not images:
-        return images
+AD_LINK_DOMAINS = {
+    "manga-bl.com", "manga-bh.com", "manga-kr.com", "readmangathai.com",
+    "facebook.com", "line.me", "bit.ly", "goo.gl", "shorturl.at",
+}
+
+# รูป placeholder ที่ไม่ใช่หน้ามังงะจริง
+PLACEHOLDER_PATTERNS = {
+    "data:image", "placeholder", "loading", "spinner",
+    "1x1", "blank", "empty", ".svg", "default-image",
+}
+
+def is_ad_or_placeholder(src: str, img_tag, chapter_url: str) -> bool:
+    """ตรวจว่ารูปนี้เป็นโฆษณาหรือ placeholder"""
+    src_lower = src.lower()
+
+    # 1. URL มีคีย์เวิร์ดโฆษณา
+    if any(kw in src_lower for kw in AD_URL_KEYWORDS):
+        return True
+
+    # 2. URL เป็น placeholder/data URI/SVG ขนาดเล็ก
+    if any(p in src_lower for p in PLACEHOLDER_PATTERNS):
+        return True
+
+    # 3. img อยู่ใน <a> ที่ชี้ไปเว็บอื่น (โฆษณาแบบ clickable)
     try:
-        chapter_host = urlparse(chapter_url).netloc.lower().replace("www.", "")
+        parent_a = img_tag.find_parent("a")
+        if parent_a and parent_a.get("href"):
+            href = parent_a["href"]
+            href_host = urlparse(href).netloc.lower().replace("www.", "")
+            ch_host   = urlparse(chapter_url).netloc.lower().replace("www.", "")
+            if href_host and href_host != ch_host:
+                # ชี้ไปเว็บอื่น = โฆษณา
+                return True
     except Exception:
-        return images
+        pass
 
-    filtered = []
-    for img in images:
-        try:
-            img_host = urlparse(img).netloc.lower().replace("www.", "")
-            # ตัดออกถ้าเป็น ad domain ที่รู้จัก
-            if any(ad in img_host for ad in AD_DOMAINS):
-                continue
-            # เก็บถ้า: domain เดียวกัน, CDN, หรือ osemocphoto (nekopost)
-            if (img_host == chapter_host
-                    or "cdn" in img_host
-                    or "osemocphoto" in img_host
-                    or "img" in img_host
-                    or "image" in img_host
-                    or "storage" in img_host
-                    or "static" in img_host):
-                filtered.append(img)
-            # ถ้าไม่แน่ใจแต่ chapter มาจาก domain เดียวกับ img → เก็บ
-            else:
-                # เก็บถ้าไม่ใช่ domain ต่างออกไปชัดเจน
-                filtered.append(img)
-        except Exception:
-            filtered.append(img)
-
-    # ถ้ากรองหมดเลยให้ return ต้นฉบับ (ป้องกัน edge case)
-    return filtered if filtered else images
+    return False
 
 
 def extract_chapter_number(text: str, url: str = "") -> float:
@@ -242,7 +244,12 @@ async def scrape_chapters_madara(client: httpx.AsyncClient, manga_id: str, sourc
 
 async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> list:
     try:
-        resp = await client.get(chapter_url, headers={**HEADERS, 'Referer': chapter_url}, timeout=25)
+        ch_host = urlparse(chapter_url).netloc.lower().replace("www.", "")
+        resp = await client.get(
+            chapter_url,
+            headers={**HEADERS, 'Referer': f"https://{ch_host}/"},
+            timeout=25,
+        )
         soup = BeautifulSoup(resp.text, 'html.parser')
         images = []
 
@@ -254,15 +261,27 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
             soup
         )
         for img in container.select('img'):
+            # ลอง data attributes หลายแบบ (lazy loading ต่างๆ)
             src = (
                 img.get('data-src') or
                 img.get('data-lazy-src') or
+                img.get('data-original') or
+                img.get('data-url') or
+                img.get('data-full-url') or
+                img.get('data-large-file') or
                 img.get('src') or ''
             ).strip()
-            if src and 'data:image' not in src and src.startswith('http'):
-                images.append(src)
 
-        return filter_ad_images(images, chapter_url)
+            if not src or not src.startswith('http'):
+                continue
+
+            # กรองโฆษณาและ placeholder
+            if is_ad_or_placeholder(src, img, chapter_url):
+                continue
+
+            images.append(src)
+
+        return images
     except Exception:
         return []
 
