@@ -460,6 +460,31 @@ async def reset_chapters_cache(secret: str = Query(...)):
     return {"status": "ok", "message": "Chapters cache cleared — will re-scrape on next request"}
 
 
+@app.post("/api/ingest-chapters")
+async def ingest_chapters(payload: dict):
+    """รับ chapters จาก local scraper แล้วบันทึกลง DB"""
+    if payload.get("secret") != os.getenv("MIGRATE_SECRET", "changeme"):
+        raise HTTPException(403, "Invalid secret")
+    manga_id = payload.get("manga_id")
+    chapters = payload.get("chapters", [])
+    if not manga_id or not chapters:
+        raise HTTPException(400, "manga_id and chapters required")
+    inserted = 0
+    async with app.state.pool.acquire() as conn:
+        for ch in chapters:
+            try:
+                await conn.execute("""
+                    INSERT INTO chapters (id, manga_id, number, title, source_url)
+                    VALUES ($1,$2,$3,$4,$5)
+                    ON CONFLICT (id) DO NOTHING
+                """, ch["id"], manga_id, float(ch["number"]), ch["title"], ch["source_url"])
+                inserted += 1
+            except Exception:
+                pass
+        await conn.execute("UPDATE manga SET chapters_fetched=TRUE WHERE id=$1", manga_id)
+    return {"status": "ok", "inserted": inserted}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "3.0"}
