@@ -7,6 +7,7 @@ from urllib.parse import unquote
 import asyncpg
 import httpx
 from bs4 import BeautifulSoup
+from curl_cffi.requests import AsyncSession as CurlSession
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -195,15 +196,15 @@ app.add_middleware(
 # ─────────────────────────────────────────────────────────
 # Scrapers — Madara / Themesia (WordPress manga theme)
 # ─────────────────────────────────────────────────────────
-async def scrape_chapters_madara(client: httpx.AsyncClient, manga_id: str, source_url: str) -> list:
+async def scrape_chapters_madara(session: CurlSession, manga_id: str, source_url: str) -> list:
     soup = None
     # ลอง AJAX endpoint ก่อน (Madara/Themesia ใช้วิธีนี้)
     ajax_url = source_url.rstrip('/') + '/ajax/chapters/'
     try:
-        resp = await client.post(
+        resp = await session.post(
             ajax_url,
             headers={**HEADERS, 'X-Requested-With': 'XMLHttpRequest', 'Referer': source_url},
-            timeout=20,
+            impersonate="chrome120", timeout=20,
         )
         if resp.status_code == 200 and len(resp.text.strip()) > 100:
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -213,51 +214,66 @@ async def scrape_chapters_madara(client: httpx.AsyncClient, manga_id: str, sourc
     # Fallback: โหลด manga page โดยตรง
     if not soup:
         try:
-            resp = await client.get(source_url, headers=HEADERS, timeout=20)
+            resp = await session.get(source_url, headers=HEADERS, impersonate="chrome120", timeout=20)
             soup = BeautifulSoup(resp.text, 'html.parser')
         except Exception:
             return []
 
     chapters = []
-    for li in soup.select('li.wp-manga-chapter, li.a-h.wleft, .chapter-item, li[class*="chapter"]'):
-        a = li.select_one('a')
-        if not a or not a.get('href'):
-            continue
-        ch_url = a['href'].strip()
-        title = a.get_text(strip=True)
-        if not title or not ch_url:
-            continue
-        number = extract_chapter_number(title, ch_url)
-        ch_id = make_chapter_id(manga_id, number)
-        chapters.append({
-            'id': ch_id,
-            'manga_id': manga_id,
-            'number': number,
-            'title': title,
-            'source_url': ch_url,
-        })
+    seen_urls = set()
 
-    # เรียง: ล่าสุด (เลขสูง) ก่อน
+    # Madara selectors
+    CHAPTER_SELECTORS = [
+        'li.wp-manga-chapter a',          # Madara standard
+        'li.a-h.wleft a',                 # Madara alt
+        '.chapter-item a',                # generic
+        '.eplister li a',                 # Themesia standard
+        '.eplisterfull li a',             # Themesia full list
+        '.bxcl li a',                     # Themesia alt
+        'ul.clstyle li a',                # Themesia clstyle
+        '#chapter_list li a',             # id-based fallback
+    ]
+
+    for selector in CHAPTER_SELECTORS:
+        for a in soup.select(selector):
+            ch_url = (a.get('href') or '').strip()
+            if not ch_url or ch_url in seen_urls:
+                continue
+            # ตรวจว่าเป็น chapter URL จริง (มี /chapter หรือตัวเลข)
+            if not re.search(r'/chapter[-/]?\d|/\d+/?$', ch_url, re.I):
+                continue
+            seen_urls.add(ch_url)
+            title = a.get_text(strip=True)
+            number = extract_chapter_number(title, ch_url)
+            ch_id = make_chapter_id(manga_id, number)
+            chapters.append({
+                'id': ch_id,
+                'manga_id': manga_id,
+                'number': number,
+                'title': title or f'Chapter {int(number)}',
+                'source_url': ch_url,
+            })
+        if chapters:
+            break  # ใช้ selector แรกที่ได้ผลลัพธ์
+
     chapters.sort(key=lambda x: x['number'], reverse=True)
     return chapters
 
 
-async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> list:
+async def scrape_pages_madara(session: CurlSession, chapter_url: str) -> list:
     try:
         ch_host = urlparse(chapter_url).netloc.lower().replace("www.", "")
-        resp = await client.get(
+        resp = await session.get(
             chapter_url,
             headers={**HEADERS, 'Referer': f"https://{ch_host}/"},
-            timeout=25,
+            impersonate="chrome120", timeout=25,
         )
         soup = BeautifulSoup(resp.text, 'html.parser')
         images = []
 
-        # ── วิธีที่ 1: ts_reader.run() — Madara/Themesia บางเว็บโหลดรูปผ่าน JS ──
+        # ── วิธีที่ 1: ts_reader.run() ──
         for script in soup.find_all('script'):
             text = script.string or ''
-
-            # ts_reader.run({"sources":[{"images":["url1","url2"]}]})
             m = re.search(r'ts_reader\.run\((\{.*?\})\s*\)', text, re.DOTALL)
             if m:
                 try:
@@ -268,8 +284,6 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
                                 images.append(img_url.strip())
                 except Exception:
                     pass
-
-            # chapter_preloaded_images = ["url1","url2"]
             m2 = re.search(r'chapter_preloaded_images\s*=\s*(\[.*?\])', text, re.DOTALL)
             if m2:
                 try:
@@ -285,25 +299,20 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
         container = (
             soup.select_one('.reading-content') or
             soup.select_one('.chapter-content') or
+            soup.select_one('#readerarea') or
             soup.select_one('.entry-content') or
             soup
         )
         for img in container.select('img'):
             src = (
-                img.get('data-src') or
-                img.get('data-lazy-src') or
-                img.get('data-original') or
-                img.get('data-url') or
-                img.get('data-full-url') or
-                img.get('data-large-file') or
-                img.get('src') or ''
+                img.get('data-src') or img.get('data-lazy-src') or
+                img.get('data-original') or img.get('data-url') or
+                img.get('data-full-url') or img.get('src') or ''
             ).strip()
-
             if not src or not src.startswith('http'):
                 continue
             if is_ad_or_placeholder(src, img, chapter_url):
                 continue
-
             images.append(src)
 
         return images
@@ -321,7 +330,7 @@ def _neko_pid(source_url: str) -> str:
     """ดึง project ID จาก nekopost URL"""
     return source_url.rstrip('/').split('/')[-1]
 
-async def scrape_chapters_nekopost(client: httpx.AsyncClient, manga_id: str, source_url: str) -> list:
+async def scrape_chapters_nekopost(client: CurlSession, manga_id: str, source_url: str) -> list:
     pid = _neko_pid(source_url)
     neko_headers = {**HEADERS, 'Referer': NEKO_BASE + '/', 'Accept': 'application/json'}
 
@@ -380,7 +389,7 @@ async def scrape_chapters_nekopost(client: httpx.AsyncClient, manga_id: str, sou
     return chapters
 
 
-async def scrape_pages_nekopost(client: httpx.AsyncClient, chapter_url: str) -> list:
+async def scrape_pages_nekopost(client: CurlSession, chapter_url: str) -> list:
     # URL: https://www.nekopost.net/manga/{pid}/{chapter_no}/0
     parts = chapter_url.rstrip('/').split('/')
     neko_headers = {**HEADERS, 'Referer': NEKO_BASE + '/', 'Accept': 'application/json'}
@@ -529,7 +538,7 @@ async def get_chapters(manga_id: str):
     source_url = manga['source_url'] or ''
     theme = get_theme(source_url)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+    async with CurlSession() as client:
         if theme == 'nekopost':
             chapters = await scrape_chapters_nekopost(client, manga_id, source_url)
         else:
@@ -572,7 +581,7 @@ async def get_pages(chapter_id: str, force: bool = False):
     source_url = chapter['source_url'] or ''
     theme = get_theme(source_url)
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+    async with CurlSession() as client:
         if theme == 'nekopost':
             pages = await scrape_pages_nekopost(client, source_url)
         else:
