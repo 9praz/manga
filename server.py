@@ -1,4 +1,4 @@
-import os, json, hashlib, re, asyncio
+import os, json as json_module, hashlib, re, asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -253,7 +253,35 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
         soup = BeautifulSoup(resp.text, 'html.parser')
         images = []
 
-        # หา reading content
+        # ── วิธีที่ 1: ts_reader.run() — Madara/Themesia บางเว็บโหลดรูปผ่าน JS ──
+        for script in soup.find_all('script'):
+            text = script.string or ''
+
+            # ts_reader.run({"sources":[{"images":["url1","url2"]}]})
+            m = re.search(r'ts_reader\.run\((\{.*?\})\s*\)', text, re.DOTALL)
+            if m:
+                try:
+                    data = json_module.loads(m.group(1))
+                    for source in data.get('sources', []):
+                        for img_url in source.get('images', []):
+                            if img_url and img_url.startswith('http'):
+                                images.append(img_url.strip())
+                except Exception:
+                    pass
+
+            # chapter_preloaded_images = ["url1","url2"]
+            m2 = re.search(r'chapter_preloaded_images\s*=\s*(\[.*?\])', text, re.DOTALL)
+            if m2:
+                try:
+                    urls = json_module.loads(m2.group(1))
+                    images.extend([u.strip() for u in urls if u and u.startswith('http')])
+                except Exception:
+                    pass
+
+        if images:
+            return images
+
+        # ── วิธีที่ 2: HTML img tags (fallback) ──
         container = (
             soup.select_one('.reading-content') or
             soup.select_one('.chapter-content') or
@@ -261,7 +289,6 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
             soup
         )
         for img in container.select('img'):
-            # ลอง data attributes หลายแบบ (lazy loading ต่างๆ)
             src = (
                 img.get('data-src') or
                 img.get('data-lazy-src') or
@@ -274,8 +301,6 @@ async def scrape_pages_madara(client: httpx.AsyncClient, chapter_url: str) -> li
 
             if not src or not src.startswith('http'):
                 continue
-
-            # กรองโฆษณาและ placeholder
             if is_ad_or_placeholder(src, img, chapter_url):
                 continue
 
@@ -409,10 +434,21 @@ async def reset_pages_cache(secret: str = Query(...)):
     if secret != os.getenv("MIGRATE_SECRET", "changeme"):
         raise HTTPException(403, "Invalid secret")
     async with app.state.pool.acquire() as conn:
-        result = await conn.execute(
+        await conn.execute(
             "UPDATE chapters SET pages_fetched = FALSE, pages = NULL WHERE pages_fetched = TRUE"
         )
-    return {"status": "ok", "message": "Pages cache cleared — will re-scrape on next request"}
+    return {"status": "ok", "message": "Pages cache cleared"}
+
+
+@app.get("/api/reset-chapters-cache")
+async def reset_chapters_cache(secret: str = Query(...)):
+    """Reset chapters_fetched ทั้งหมด เพื่อ re-scrape chapter list ใหม่"""
+    if secret != os.getenv("MIGRATE_SECRET", "changeme"):
+        raise HTTPException(403, "Invalid secret")
+    async with app.state.pool.acquire() as conn:
+        await conn.execute("DELETE FROM chapters")
+        await conn.execute("UPDATE manga SET chapters_fetched = FALSE")
+    return {"status": "ok", "message": "Chapters cache cleared — will re-scrape on next request"}
 
 
 @app.get("/health")
