@@ -1,29 +1,34 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// app/layout.tsx
+// ✅ Base SEO + Thai/English font setup
+import type { Metadata } from 'next';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: "Manga.Blue — อ่านมังงะแปลไทย",
-  description: "อ่านมังงะแปลไทยฟรี อัปเดตล่าสุด ไม่มีโฆษณา",
-  icons: { icon: "/favicon.ico" },
+  metadataBase: new URL('https://yourdomain.com'), // ← เปลี่ยน domain
+  title: {
+    default: 'อ่านมังงะออนไลน์ฟรี | มังงะแปลไทย',
+    template: '%s | มังงะแปลไทย',
+  },
+  description: 'อ่านมังงะออนไลน์ฟรี มังงะแปลไทย อัปเดตใหม่ทุกวัน',
+  verification: {
+    // ใส่ Google Search Console verification code ตรงนี้
+    // google: 'xxxxxxxxxxxxxxxxxxxx',
+  },
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{ children: React.ReactNode }>) {
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="th" className="dark">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="th">
+      <head>
+        {/* Preconnect สำหรับ performance */}
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      </head>
+      <body className="antialiased bg-[#050505]">
         {children}
       </body>
     </html>

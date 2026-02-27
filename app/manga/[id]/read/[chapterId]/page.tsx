@@ -1,7 +1,12 @@
+// app/manga/[id]/read/[chapterId]/page.tsx
+// ✅ Server Component + SEO + Performance
+import type { Metadata } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import Link from 'next/link';
+import { notFound } from 'next/navigation';
+import ReaderImages from './_components/ReaderImages';
 
-// ✅ Cache หน้าอ่านมังงะ 1 ชั่วโมง — Vercel serve จาก CDN ทันที
+// ✅ Cache reader 1 ชั่วโมง
 export const revalidate = 3600;
 
 const supabase = createClient(
@@ -20,121 +25,194 @@ function extractChapterNum(title: string): number {
   return 0;
 }
 
-export default async function ReaderPage({ params }: { params: Promise<{ id: string; chapterId: string }> }) {
+// ─── Dynamic SEO per chapter ─────────────────────────────────────────────────
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string; chapterId: string }>;
+}): Promise<Metadata> {
+  const { id, chapterId } = await params;
+  const mangaTitle = decodeURIComponent(id);
+
+  const { data } = await supabase
+    .from('chapters')
+    .select('chapter_title')
+    .eq('id', chapterId)
+    .single();
+
+  const chapterTitle = data?.chapter_title ?? 'ตอนใหม่';
+  const num = extractChapterNum(chapterTitle);
+
+  return {
+    title: `อ่าน ${mangaTitle} ${chapterTitle} | มังงะแปลไทย`,
+    description: `อ่าน ${mangaTitle} ตอนที่ ${num} แปลไทย ออนไลน์ฟรี ไม่ต้องสมัครสมาชิก`,
+    keywords: [
+      `${mangaTitle} ตอนที่ ${num}`, `อ่าน ${mangaTitle}`,
+      `${mangaTitle} แปลไทย`, 'อ่านมังงะ', 'manga online',
+    ],
+    openGraph: {
+      title: `อ่าน ${mangaTitle} ${chapterTitle}`,
+      description: `อ่าน ${mangaTitle} ตอนที่ ${num} แปลไทย ออนไลน์ฟรี`,
+      type: 'article',
+      locale: 'th_TH',
+    },
+    robots: { index: true, follow: true },
+    alternates: {
+      canonical: `https://yourdomain.com/manga/${encodeURIComponent(mangaTitle)}/read/${chapterId}`,
+    },
+  };
+}
+
+export default async function ReaderPage({
+  params,
+}: {
+  params: Promise<{ id: string; chapterId: string }>;
+}) {
   const { id, chapterId } = await params;
   const decodedMangaTitle = decodeURIComponent(id);
 
-  // ✅ Parallel fetch — ดึงทั้ง chapter data และ chapter list พร้อมกัน
+  // ✅ Parallel fetch — chapter data + all chapters พร้อมกัน
   const [{ data: currentChapter }, { data: allChapters }] = await Promise.all([
     supabase.from('chapters').select('*').eq('id', chapterId).single(),
     supabase
       .from('chapters')
       .select('id, chapter_title')
-      .eq('manga_title', decodedMangaTitle)
-      .order('chapter_title', { ascending: false }),
+      .eq('manga_title', decodedMangaTitle),
   ]);
 
-  if (!currentChapter) {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-white bg-[#0a0a0a]">
-        ไม่พบข้อมูลตอนนี้
-      </div>
-    );
-  }
+  if (!currentChapter) notFound();
 
+  // ✅ Parse images
   let images: string[] = [];
   try {
-    images = typeof currentChapter.image_urls === 'string'
-      ? JSON.parse(currentChapter.image_urls)
-      : Array.isArray(currentChapter.image_urls)
+    images =
+      typeof currentChapter.image_urls === 'string'
+        ? JSON.parse(currentChapter.image_urls)
+        : Array.isArray(currentChapter.image_urls)
         ? currentChapter.image_urls
         : [];
   } catch { images = []; }
 
-  // ✅ เรียง chapters ด้วย extractChapterNum เพื่อให้ถูกต้อง
-  const sortedChapters = [...(allChapters || [])].sort((a, b) =>
-    extractChapterNum(b.chapter_title) - extractChapterNum(a.chapter_title)
+  // ✅ Filter เอาเฉพาะ url ที่ valid
+  images = images.filter((u) => typeof u === 'string' && u.startsWith('http'));
+
+  // ✅ Proxy URLs
+  const proxiedImages = images.map(
+    (url) => `/api/proxy-image?url=${encodeURIComponent(url)}`
   );
 
-  const currentIndex = sortedChapters.findIndex(c => c.id === chapterId);
-  const nextChapter  = currentIndex > 0 ? sortedChapters[currentIndex - 1] : null;
-  const prevChapter  = currentIndex < sortedChapters.length - 1 ? sortedChapters[currentIndex + 1] : null;
+  // ✅ Sort chapters + หา prev/next
+  const sorted = [...(allChapters || [])].sort(
+    (a, b) => extractChapterNum(b.chapter_title) - extractChapterNum(a.chapter_title)
+  );
+  const currentIndex = sorted.findIndex((c) => c.id === chapterId);
+  const nextChapter = currentIndex > 0 ? sorted[currentIndex - 1] : null;
+  const prevChapter = currentIndex < sorted.length - 1 ? sorted[currentIndex + 1] : null;
+
+  const chapterNum = extractChapterNum(currentChapter.chapter_title);
+
+  // JSON-LD Article
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Article',
+    headline: `อ่าน ${decodedMangaTitle} ตอนที่ ${chapterNum}`,
+    inLanguage: 'th',
+    isPartOf: {
+      '@type': 'Book',
+      name: decodedMangaTitle,
+      url: `https://yourdomain.com/manga/${encodeURIComponent(decodedMangaTitle)}`,
+    },
+  };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-white font-sans">
+    <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
 
-      {/* ─── HEADER ─── */}
-      <div className="sticky top-0 z-50 bg-[#141414]/90 backdrop-blur-md border-b border-gray-800 p-4 flex justify-between items-center shadow-lg">
-        <Link href="/" className="text-blue-500 hover:text-blue-400 font-bold transition-colors text-sm">
-          ← หน้าหลัก
-        </Link>
-        <div className="text-center flex-1 px-4">
-          <h1 className="text-base font-bold text-gray-100 line-clamp-1">{decodedMangaTitle}</h1>
-          <p className="text-xs text-gray-400">{currentChapter.chapter_title}</p>
-        </div>
-        <Link href={`/manga/${id}`} className="text-zinc-400 hover:text-white font-bold transition-colors text-sm">
-          ตอนทั้งหมด
-        </Link>
-      </div>
+      <div className="min-h-screen bg-[#0a0a0a] text-white">
 
-      {/* ─── NAV TOP ─── */}
-      <div className="max-w-3xl mx-auto flex justify-between items-center px-4 py-3 border-b border-zinc-800">
-        {prevChapter ? (
-          <Link href={`/manga/${id}/read/${prevChapter.id}`}
-            className="bg-zinc-800 hover:bg-zinc-700 px-4 py-2 rounded-lg text-sm transition-colors">
-            « ตอนก่อนหน้า
+        {/* ─── STICKY HEADER ─── */}
+        <header className="sticky top-0 z-50 bg-[#111]/90 backdrop-blur-md border-b border-zinc-800 px-4 py-3 flex justify-between items-center">
+          <Link
+            href="/"
+            className="text-blue-500 hover:text-blue-400 font-bold text-sm transition-colors whitespace-nowrap"
+          >
+            ← หน้าหลัก
           </Link>
-        ) : <div />}
-        {nextChapter ? (
-          <Link href={`/manga/${id}/read/${nextChapter.id}`}
-            className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm transition-colors">
-            ตอนถัดไป »
-          </Link>
-        ) : <div />}
-      </div>
-
-      {/* ─── IMAGES ─── */}
-      <div className="max-w-3xl mx-auto flex flex-col items-center bg-black">
-        {images.length > 0 ? (
-          images.map((url: string, index: number) => {
-            const src = url.startsWith('http')
-              ? `/api/proxy-image?url=${encodeURIComponent(url)}`
-              : url;
-            return (
-              <img
-                key={index}
-                src={src}
-                alt={`Page ${index + 1}`}
-                className="w-full h-auto block"
-                // ✅ โหลด 3 รูปแรกทันที ที่เหลือ lazy
-                loading={index < 3 ? 'eager' : 'lazy'}
-                decoding="async"
-              />
-            );
-          })
-        ) : (
-          <div className="text-center mt-20 pb-20">
-            <p className="text-gray-500">ไม่พบรูปภาพในตอนนี้</p>
+          <div className="text-center flex-1 px-3 min-w-0">
+            <h1 className="text-sm font-bold text-zinc-100 truncate">{decodedMangaTitle}</h1>
+            <p className="text-[11px] text-zinc-400">{currentChapter.chapter_title}</p>
           </div>
-        )}
-      </div>
+          <Link
+            href={`/manga/${id}`}
+            className="text-zinc-400 hover:text-white font-bold text-sm transition-colors whitespace-nowrap"
+          >
+            ทั้งหมด
+          </Link>
+        </header>
 
-      {/* ─── NAV BOTTOM ─── */}
-      <div className="max-w-3xl mx-auto p-4 flex justify-between items-center border-t border-gray-800 mb-10">
-        {prevChapter ? (
-          <Link href={`/manga/${id}/read/${prevChapter.id}`}
-            className="bg-zinc-800 hover:bg-zinc-700 px-4 py-2 rounded-lg text-sm transition-colors">
-            « ตอนก่อนหน้า
-          </Link>
-        ) : <div />}
-        <span className="text-gray-500 text-sm">จบตอน</span>
-        {nextChapter ? (
-          <Link href={`/manga/${id}/read/${nextChapter.id}`}
-            className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm transition-colors">
-            ตอนถัดไป »
-          </Link>
-        ) : <div />}
+        {/* ─── NAV TOP ─── */}
+        <ChapterNav id={id} prev={prevChapter} next={nextChapter} position="top" />
+
+        {/* ─── IMAGES ─── */}
+        {/* ✅ ReaderImages = Client Component จัดการ progressive loading */}
+        <ReaderImages
+          images={proxiedImages}
+          chapterTitle={currentChapter.chapter_title}
+        />
+
+        {/* ─── NAV BOTTOM ─── */}
+        <ChapterNav id={id} prev={prevChapter} next={nextChapter} position="bottom" />
+
+        <div className="h-16" />
       </div>
-    </div>
+    </>
+  );
+}
+
+// ─── Chapter Nav Component ────────────────────────────────────────────────────
+function ChapterNav({
+  id,
+  prev,
+  next,
+  position,
+}: {
+  id: string;
+  prev: { id: string; chapter_title: string } | null;
+  next: { id: string; chapter_title: string } | null;
+  position: 'top' | 'bottom';
+}) {
+  const borderClass = position === 'top' ? 'border-b' : 'border-t';
+  return (
+    <nav
+      className={`max-w-3xl mx-auto flex justify-between items-center px-4 py-3 ${borderClass} border-zinc-800`}
+      aria-label={position === 'top' ? 'นำทางบน' : 'นำทางล่าง'}
+    >
+      {prev ? (
+        <Link
+          href={`/manga/${id}/read/${prev.id}`}
+          prefetch={true}
+          className="bg-zinc-800 hover:bg-zinc-700 px-4 py-2 rounded-xl text-sm font-bold transition-colors"
+        >
+          « ตอนก่อนหน้า
+        </Link>
+      ) : <div />}
+
+      {position === 'bottom' && (
+        <span className="text-zinc-600 text-xs">จบตอน</span>
+      )}
+
+      {next ? (
+        <Link
+          href={`/manga/${id}/read/${next.id}`}
+          prefetch={true}
+          className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl text-sm font-bold transition-colors"
+        >
+          ตอนถัดไป »
+        </Link>
+      ) : <div />}
+    </nav>
   );
 }
