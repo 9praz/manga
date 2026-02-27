@@ -7,22 +7,20 @@ import {
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = "https://ztvchypgeoeiijjhclnh.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp0dmNoeXBnZW9laWlqamhjbG5oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE3NDc1NzUsImV4cCI6MjA4NzMyMzU3NX0.ifHhClrpORNR0_JR_Q04q8b_yHbrEgSuIrPf5aaFX-Y";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://ztvchypgeoeiijjhclnh.supabase.co";
+const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp0dmNoeXBnZW9laWlqamhjbG5oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE3NDc1NzUsImV4cCI6MjA4NzMyMzU3NX0.ifHhClrpORNR0_JR_Q04q8b_yHbrEgSuIrPf5aaFX-Y";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ✅ ส่งรูปภาพทุกใบผ่าน proxy (แก้ hotlink, stream ไม่โหลดลงเครื่อง)
 const p = (url: string) =>
   url && url.startsWith('http') && !url.includes('placehold.co')
     ? `/api/proxy-image?url=${encodeURIComponent(url)}`
     : url;
 
-// ─── หมวดหมู่ประเทศ ───
 const COUNTRIES = [
-  { key: 'all',   label: 'ทั้งหมด',     flag: '🌏' },
-  { key: 'japan', label: 'ญี่ปุ่น',     flag: '🇯🇵' },
-  { key: 'korea', label: 'เกาหลี',      flag: '🇰🇷' },
-  { key: 'china', label: 'จีน',         flag: '🇨🇳' },
+  { key: 'all',   label: 'ทั้งหมด', flag: '🌏' },
+  { key: 'japan', label: 'ญี่ปุ่น', flag: '🇯🇵' },
+  { key: 'korea', label: 'เกาหลี',  flag: '🇰🇷' },
+  { key: 'china', label: 'จีน',     flag: '🇨🇳' },
 ];
 
 interface Manga {
@@ -31,19 +29,20 @@ interface Manga {
   cover: string;
   genres: string[];
   country: string;
-  desc?: string;
   sources: { name: string; url: string }[];
 }
 interface Chapter { id: string; title: string; url: string; number: number; }
 
 const T = {
-  readNow:"อ่านตอนนี้", recommended:"มังงะแนะนำ",
-  readFirst:"ตอนแรก", chapterList:"รายชื่อตอน",
-  synopsis:"เรื่องย่อ", allTitles:"รายการทั้งหมด",
-  searchResult:"ผลการค้นหา", searchPlaceholder:"ค้นหาชื่อมังงะ...",
-  noFile:"ไม่สามารถเชื่อมต่อ Database ได้", loading:"กำลังโหลด...",
-  allGenres:"ทุกประเภท",
+  readNow: "อ่านตอนนี้", recommended: "มังงะแนะนำ",
+  readFirst: "ตอนแรก", chapterList: "รายชื่อตอน",
+  allTitles: "รายการทั้งหมด",
+  searchResult: "ผลการค้นหา", searchPlaceholder: "ค้นหาชื่อมังงะ...",
+  noFile: "ไม่สามารถเชื่อมต่อ Database ได้", loading: "กำลังโหลด...",
+  allGenres: "ทุกประเภท",
 };
+
+const PER_PAGE = 24;
 
 function extractChapterNum(title: string): number {
   if (!title) return 0;
@@ -114,7 +113,6 @@ const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void })
   const src = err
     ? `https://placehold.co/300x420/111827/3b82f6?text=${encodeURIComponent(m.title.slice(0, 12))}`
     : m.cover;
-
   const countryFlag = COUNTRIES.find(c => c.key === m.country)?.flag || '🌏';
 
   return (
@@ -140,30 +138,26 @@ const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void })
 });
 MangaCard.displayName = 'MangaCard';
 
-const PER_PAGE = 24;
-
 // ─────────────────────── HOME PAGE ───────────────────────
 export default function HomePage() {
-  const [allData, setAllData]         = useState<Manga[]>([]);
-  const [mangas, setMangas]           = useState<Manga[]>([]);
-  const [total, setTotal]             = useState(0);
-  const [banner, setBanner]           = useState<Manga[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [catalogErr, setCatalogErr]   = useState("");
+  const [allData, setAllData]       = useState<Manga[]>([]);
+  const [mangas, setMangas]         = useState<Manga[]>([]);
+  const [total, setTotal]           = useState(0);
+  const [banner, setBanner]         = useState<Manga[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [catalogErr, setCatalogErr] = useState("");
 
-  const [query, setQuery]             = useState("");
-  const [dark, setDark]               = useState(true);
-  const [page, setPage]               = useState(1);
-  const [totalPages, setTotalPages]   = useState(1);
+  const [query, setQuery]           = useState("");
+  const [dark, setDark]             = useState(true);
+  const [page, setPage]             = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
 
-  // ─── Filter state ───
   const [selectedCountry, setSelectedCountry] = useState("all");
-  const [selectedGenre,   setSelectedGenre]   = useState("all");
+  const [selectedGenre, setSelectedGenre]     = useState("all");
 
-  // ─── Modal state ───
-  const [mOpen,    setMOpen]    = useState(false);
-  const [mManga,   setMManga]   = useState<Manga | null>(null);
-  const [mChaps,   setMChaps]   = useState<Chapter[]>([]);
+  const [mOpen, setMOpen]       = useState(false);
+  const [mManga, setMManga]     = useState<Manga | null>(null);
+  const [mChaps, setMChaps]     = useState<Chapter[]>([]);
   const [mLoading, setMLoading] = useState(false);
   const [dropOpen, setDropOpen] = useState(false);
 
@@ -175,84 +169,55 @@ export default function HomePage() {
     document.documentElement.classList.toggle('dark', d);
   }, []);
 
-  // ─── Load data from Supabase ───
-  // ✅ FIX: Supabase มี default limit 1,000 rows → ใช้ pagination loop ดึงทุก manga
+  // ─── ✅ ดึงจาก mangas table — 1 request แทน 24 requests ───
   useEffect(() => {
-    setLoading(true);
-
-    const loadAllMangas = async () => {
-      const mangaMap = new Map<string, Manga>();
-      const PAGE_SIZE = 1000;
-      let from = 0;
-
-      while (true) {
+    const loadMangas = async () => {
+      setLoading(true);
+      try {
         const { data, error } = await supabase
-          .from('chapters')
-          .select('manga_title, cover_url, chapter_title, source_url, genres, country')
-          .order('manga_title', { ascending: true })
-          .range(from, from + PAGE_SIZE - 1);
+          .from('mangas')
+          .select('title, cover_url, genres, country')
+          .order('title', { ascending: true });
 
         if (error) throw error;
-        if (!data || data.length === 0) break;
+        if (!data || data.length === 0) throw new Error("ไม่พบข้อมูล");
 
-        data.forEach((row: any) => {
-          if (!mangaMap.has(row.manga_title)) {
-            const finalCover =
-              row.cover_url && row.cover_url.trim() !== ''
-                ? row.cover_url
-                : `https://placehold.co/400x600/1f2937/3b82f6?text=${encodeURIComponent(row.manga_title.slice(0, 15))}`;
+        const list: Manga[] = data.map((row: any) => ({
+          id:      row.title,
+          title:   row.title,
+          cover:   row.cover_url && row.cover_url.trim() !== ''
+            ? row.cover_url
+            : `https://placehold.co/400x600/1f2937/3b82f6?text=${encodeURIComponent(row.title.slice(0, 15))}`,
+          genres:  Array.isArray(row.genres) ? [...new Set(row.genres as string[])] : [],
+          country: row.country || 'japan',
+          sources: [],
+        }));
 
-            mangaMap.set(row.manga_title, {
-              id:      row.manga_title,
-              title:   row.manga_title,
-              cover:   finalCover,
-              genres:  Array.isArray(row.genres) ? [...new Set(row.genres as string[])] : [],
-              country: row.country || 'japan',
-              desc:    `อัปเดต: ${row.chapter_title}`,
-              sources: [{ name: "Source", url: row.source_url || "#" }],
-            });
-          }
-        });
-
-        if (data.length < PAGE_SIZE) break;
-        from += PAGE_SIZE;
+        setAllData(list);
+        setBanner(list.slice(0, 5));
+        setCatalogErr("");
+      } catch (err: any) {
+        console.error(err);
+        setCatalogErr(T.noFile);
+      } finally {
+        setLoading(false);
       }
-
-      const uniqueMangas = Array.from(mangaMap.values());
-      setAllData(uniqueMangas);
-      setBanner(uniqueMangas.slice(0, 5));
-      setCatalogErr("");
-      setLoading(false);
     };
 
-    loadAllMangas().catch(err => {
-      console.error(err);
-      setCatalogErr(T.noFile);
-      setLoading(false);
-    });
+    loadMangas();
   }, []);
 
-  // ─── Collect all available genres from loaded data ───
   const availableGenres = useMemo(() => {
     const set = new Set<string>();
     allData.forEach(m => m.genres?.forEach(g => set.add(g)));
     return Array.from(set).sort();
   }, [allData]);
 
-  // ─── Filter + paginate ───
   useEffect(() => {
     let filtered = allData;
-
-    if (selectedCountry !== 'all')
-      filtered = filtered.filter(m => m.country === selectedCountry);
-
-    if (selectedGenre !== 'all')
-      filtered = filtered.filter(m => m.genres.includes(selectedGenre));
-
-    if (query)
-      filtered = filtered.filter(m =>
-        m.title.toLowerCase().includes(query.toLowerCase())
-      );
+    if (selectedCountry !== 'all') filtered = filtered.filter(m => m.country === selectedCountry);
+    if (selectedGenre !== 'all')   filtered = filtered.filter(m => m.genres.includes(selectedGenre));
+    if (query) filtered = filtered.filter(m => m.title.toLowerCase().includes(query.toLowerCase()));
 
     setTotal(filtered.length);
     setTotalPages(Math.max(1, Math.ceil(filtered.length / PER_PAGE)));
@@ -260,43 +225,33 @@ export default function HomePage() {
     setMangas(filtered.slice(start, start + PER_PAGE));
   }, [allData, page, query, selectedCountry, selectedGenre]);
 
-  // ─── Open manga modal ───
   const openModal = useCallback(async (manga: Manga) => {
     setMManga(manga); setMChaps([]); setMLoading(true);
     setMOpen(true); setDropOpen(false);
-const { data } = await supabase
-  .from('chapters')
-  .select('id, chapter_title, source_url')
-  .eq('manga_title', manga.title);
-if (data) {
-  const sorted = [...data].sort((a, b) =>
-    extractChapterNum(b.chapter_title) - extractChapterNum(a.chapter_title)
-  );
-  setMChaps(sorted.map((ch) => ({
-    id:     ch.id,
-    number: extractChapterNum(ch.chapter_title),
+    const { data } = await supabase
+      .from('chapters')
+      .select('id, chapter_title, source_url')
+      .eq('manga_title', manga.title);
+    if (data) {
+      const sorted = [...data].sort((a, b) =>
+        extractChapterNum(b.chapter_title) - extractChapterNum(a.chapter_title)
+      );
+      setMChaps(sorted.map(ch => ({
+        id:     ch.id,
+        number: extractChapterNum(ch.chapter_title),
         title:  ch.chapter_title
-                    .replace(/^(?:Manhwa|Manhua|Manga)(?:Color|BW)?\s*/i, '')
-                    .replace(/\s*(?:มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม|January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\s*$/i, '')
-                    .trim()
-                    || ch.chapter_title,
-        url:    ch.source_url,
+          .replace(/^(?:Manhwa|Manhua|Manga)(?:Color|BW)?\s*/i, '')
+          .replace(/\s*(?:มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม|January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\s*$/i, '')
+          .trim() || ch.chapter_title,
+        url: ch.source_url,
       })));
     }
     setMLoading(false);
   }, []);
 
-  const resetFilters = () => {
-    setSelectedCountry('all');
-    setSelectedGenre('all');
-    setQuery('');
-    setPage(1);
-  };
-
-  const goPage = (p: number) => {
-    setPage(p);
-    listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  const resetFilters = () => { setSelectedCountry('all'); setSelectedGenre('all'); setQuery(''); setPage(1); };
+  const goPage = (p: number) => { setPage(p); listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+  const hasActiveFilter = selectedCountry !== 'all' || selectedGenre !== 'all' || query !== '';
 
   const paginationGroup = () => {
     const s = Math.max(page - 2, 1);
@@ -304,10 +259,7 @@ if (data) {
     return Array.from({ length: Math.max(0, e - s + 1) }, (_, i) => s + i);
   };
 
-  const hasActiveFilter = selectedCountry !== 'all' || selectedGenre !== 'all' || query !== '';
-
-  // ─── Loading / Error screens ───
-  if (loading && allData.length === 0) return (
+  if (loading) return (
     <div className="fixed inset-0 flex flex-col items-center justify-center bg-[#0a0a0a] gap-3">
       <Loader2 className="w-7 h-7 text-blue-600 animate-spin" />
       <p className="text-xs text-zinc-500 animate-pulse">{T.loading}</p>
@@ -337,7 +289,6 @@ if (data) {
               <X size={16} />
             </button>
 
-            {/* Cover hero */}
             <div className="relative h-36 md:h-44 shrink-0 overflow-hidden bg-zinc-800">
               <img src={p(mManga.cover)} className="w-full h-full object-cover blur-2xl scale-110 opacity-20 absolute inset-0" alt="" />
               <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#0d0d0d] to-transparent" />
@@ -348,13 +299,10 @@ if (data) {
               </div>
             </div>
 
-            {/* Content */}
             <div className="flex-1 overflow-y-auto pt-14 md:pt-18 pb-8 px-6 md:px-10">
               <div className="flex flex-col md:flex-row gap-6 md:gap-8">
                 <div className="flex-1 min-w-0 space-y-3">
                   <h1 className="text-xl md:text-2xl font-black leading-tight">{mManga.title}</h1>
-
-                  {/* Genres */}
                   {mManga.genres.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
                       {[...new Set(mManga.genres)].map((g, i) => (
@@ -364,15 +312,12 @@ if (data) {
                       ))}
                     </div>
                   )}
-
-                  {/* Country */}
                   <p className="text-[10px] text-zinc-400 font-bold">
                     {COUNTRIES.find(c => c.key === mManga.country)?.flag}{' '}
                     {COUNTRIES.find(c => c.key === mManga.country)?.label || mManga.country}
                   </p>
                 </div>
 
-                {/* Chapter list */}
                 <div className="w-full md:w-64 shrink-0">
                   {mLoading ? (
                     <div className="flex justify-center py-10">
@@ -380,22 +325,18 @@ if (data) {
                     </div>
                   ) : mChaps.length > 0 ? (
                     <div className="space-y-2">
-                      {/* ปุ่มอ่านตอนล่าสุด */}
                       <a
                         href={`/manga/${encodeURIComponent(mManga.id)}/read/${mChaps[0].id}`}
                         className="w-full bg-blue-600 text-white flex justify-center py-3 rounded-xl font-black text-sm hover:bg-blue-500 transition-colors"
                       >
                         <Play size={14} className="mr-2" /> ล่าสุด
                       </a>
-                      {/* ปุ่มอ่านตอนแรก */}
                       <a
                         href={`/manga/${encodeURIComponent(mManga.id)}/read/${mChaps[mChaps.length - 1].id}`}
                         className="w-full bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-white flex justify-center py-3 rounded-xl font-black text-sm hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
                       >
                         <BookOpen size={14} className="mr-2" /> {T.readFirst}
                       </a>
-
-                      {/* Dropdown ทุกตอน */}
                       <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden mt-2">
                         <button
                           onClick={() => setDropOpen(v => !v)}
@@ -418,8 +359,6 @@ if (data) {
                           </div>
                         )}
                       </div>
-
-                      {/* ลิงก์ไปหน้ารายละเอียดเต็ม */}
                       <a
                         href={`/manga/${encodeURIComponent(mManga.id)}`}
                         className="w-full block text-center text-[10px] text-zinc-400 hover:text-blue-500 py-2 font-bold"
@@ -469,8 +408,6 @@ if (data) {
 
       {/* ─── FILTER BAR ─── */}
       <div className="px-4 md:px-6 max-w-7xl mx-auto mt-4 space-y-3">
-
-        {/* หมวดหมู่ประเทศ */}
         <div className="flex items-center gap-2 flex-wrap">
           <Globe size={12} className="text-zinc-400" />
           {COUNTRIES.map(c => (
@@ -488,7 +425,6 @@ if (data) {
           ))}
         </div>
 
-        {/* หมวดหมู่ประเภทมังงะ (แสดงเฉพาะถ้ามีข้อมูล genre ใน DB) */}
         {availableGenres.length > 0 && (
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
             <button
@@ -517,24 +453,18 @@ if (data) {
           </div>
         )}
 
-        {/* ปุ่ม Reset filter ถ้ามี filter ที่ active */}
         {hasActiveFilter && (
-          <button
-            onClick={resetFilters}
-            className="text-[10px] text-zinc-400 hover:text-red-500 font-bold flex items-center gap-1"
-          >
+          <button onClick={resetFilters} className="text-[10px] text-zinc-400 hover:text-red-500 font-bold flex items-center gap-1">
             <X size={10} /> ล้าง filter ทั้งหมด
           </button>
         )}
       </div>
 
       <main className="mt-5 space-y-7">
-        {/* Banner (เฉพาะหน้าแรก ไม่มี filter) */}
         {!query && page === 1 && selectedCountry === 'all' && selectedGenre === 'all' && (
           <BannerSlider items={banner} onOpen={openModal} />
         )}
 
-        {/* Manga Grid */}
         <section className="px-4 md:px-6 max-w-7xl mx-auto" ref={listRef}>
           <div className="flex items-center gap-2 mb-4">
             <Flame size={14} className="text-orange-500 animate-pulse" />
@@ -549,9 +479,7 @@ if (data) {
             <div className="flex flex-col items-center justify-center py-20 gap-3 text-zinc-500">
               <SearchIcon size={24} className="opacity-20" />
               <p className="text-sm font-bold">ไม่พบมังงะที่ตรงกับ filter</p>
-              <button onClick={resetFilters} className="text-xs text-blue-500 font-bold hover:underline">
-                ล้าง filter
-              </button>
+              <button onClick={resetFilters} className="text-xs text-blue-500 font-bold hover:underline">ล้าง filter</button>
             </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 md:gap-4">
@@ -559,7 +487,6 @@ if (data) {
             </div>
           )}
 
-          {/* Pagination */}
           {totalPages > 1 && (
             <div className="mt-10 flex items-center justify-center gap-1.5">
               <button
