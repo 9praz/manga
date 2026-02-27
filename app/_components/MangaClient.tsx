@@ -1,21 +1,21 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import Image from 'next/image';
 import {
   Loader2, Sun, Moon, ChevronRight, ChevronLeft, ChevronDown,
   Search as SearchIcon, X, Play, List, BookOpen, Flame, Globe
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
-// ✅ Supabase client สำหรับ modal chapters เท่านั้น
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-const p = (url: string) =>
-  url && url.startsWith('http') && !url.includes('placehold.co')
-    ? `/api/proxy-image?url=${encodeURIComponent(url)}`
-    : url;
+// ✅ ใช้ next/image optimization แทน proxy โดยตรง
+// next/image จะ resize + compress + serve จาก CDN อัตโนมัติ
+const optimizedSrc = (url: string) =>
+  url && url.startsWith('http') && !url.includes('placehold.co') ? url : url;
 
 const COUNTRIES = [
   { key: 'all',   label: 'ทั้งหมด', flag: '🌏' },
@@ -47,6 +47,7 @@ function extractChapterNum(title: string): number {
 }
 
 // ─── BANNER SLIDER ───
+// ✅ preload รูป banner แรก — ผู้ใช้เห็นรูปทันทีโดยไม่ต้องรอ
 const BannerSlider = memo(({ items, onOpen }: { items: Manga[], onOpen: (m: Manga) => void }) => {
   const [cur, setCur] = useState(0);
   useEffect(() => {
@@ -65,12 +66,28 @@ const BannerSlider = memo(({ items, onOpen }: { items: Manga[], onOpen: (m: Mang
             className={`absolute inset-0 cursor-pointer transition-opacity duration-1000 ${i === cur ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}
             onClick={() => onOpen(m)}
           >
-            <img src={p(m.cover)} className="absolute inset-0 w-full h-full object-cover scale-110 blur-2xl opacity-25" alt="" aria-hidden />
+            {/* ✅ priority=true บน banner แรก = preload ทันที */}
+            <Image
+              src={optimizedSrc(m.cover)}
+              alt=""
+              fill
+              sizes="100vw"
+              className="object-cover scale-110 blur-2xl opacity-25"
+              priority={i === 0}
+              aria-hidden
+            />
             <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/60 to-transparent" />
             <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
             <div className="relative z-10 h-full flex items-end md:items-center px-8 md:px-12 pb-8 md:pb-0 gap-7">
-              <div className="hidden md:block h-48 w-auto aspect-[2/3] rounded-xl shadow-2xl border border-white/10 flex-shrink-0 bg-zinc-800 overflow-hidden">
-                <img src={p(m.cover)} alt={m.title} className="w-full h-full object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+              <div className="hidden md:block relative h-48 w-32 rounded-xl shadow-2xl border border-white/10 flex-shrink-0 bg-zinc-800 overflow-hidden">
+                <Image
+                  src={optimizedSrc(m.cover)}
+                  alt={m.title}
+                  fill
+                  sizes="128px"
+                  className="object-cover"
+                  priority={i === 0}
+                />
               </div>
               <div className="text-white flex-1">
                 <p className="text-blue-400 text-[9px] font-black uppercase tracking-[0.3em] mb-1.5">มังงะแนะนำ</p>
@@ -99,22 +116,26 @@ const BannerSlider = memo(({ items, onOpen }: { items: Manga[], onOpen: (m: Mang
 BannerSlider.displayName = 'BannerSlider';
 
 // ─── MANGA CARD ───
-const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void }) => {
+// ✅ next/image lazy load อัตโนมัติ + serve รูป resize แล้วจาก CDN
+const MangaCard = memo(({ m, onOpen, priority }: { m: Manga, onOpen: (m: Manga) => void, priority?: boolean }) => {
   const [err, setErr] = useState(false);
   const src = err
     ? `https://placehold.co/300x420/111827/3b82f6?text=${encodeURIComponent(m.title.slice(0, 12))}`
-    : m.cover;
+    : optimizedSrc(m.cover);
   const flag = COUNTRIES.find(c => c.key === m.country)?.flag || '🌏';
 
   return (
     <div onClick={() => onOpen(m)} className="group cursor-pointer select-none">
       <div className="relative aspect-[2/3] rounded-xl overflow-hidden bg-zinc-800 transition-transform duration-300 group-hover:scale-95 ring-1 ring-transparent group-hover:ring-blue-500/40">
-        <img
-          src={p(src)}
+        <Image
+          src={src}
           alt={m.title}
-          loading="lazy"
-          decoding="async"
-          className="w-full h-full object-cover"
+          fill
+          // ✅ sizes บอก browser ขนาดจริงที่แสดง — โหลดรูปขนาดพอดี ไม่เปลือง bandwidth
+          sizes="(max-width: 640px) 33vw, (max-width: 768px) 25vw, (max-width: 1024px) 20vw, (max-width: 1280px) 16vw, 12vw"
+          className="object-cover"
+          // ✅ 8 การ์ดแรกโหลดทันที ที่เหลือ lazy
+          priority={priority}
           onError={() => setErr(true)}
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -128,9 +149,8 @@ const MangaCard = memo(({ m, onOpen }: { m: Manga, onOpen: (m: Manga) => void })
 });
 MangaCard.displayName = 'MangaCard';
 
-// ─── MAIN CLIENT COMPONENT ───
+// ─── MAIN ───
 export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[] }) {
-  // ✅ ไม่มี loading state — data มาจาก server แล้ว
   const [dark, setDark]                       = useState(true);
   const [query, setQuery]                     = useState("");
   const [page, setPage]                       = useState(1);
@@ -157,8 +177,7 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
     return Array.from(set).sort();
   }, [initialMangas]);
 
-  // ✅ Filter + paginate — ทำงานบน data ที่มีอยู่แล้วทันที ไม่ต้อง fetch
-  const { filtered, total, totalPages, mangas } = useMemo(() => {
+  const { total, totalPages, mangas } = useMemo(() => {
     let f = initialMangas;
     if (selectedCountry !== 'all') f = f.filter(m => m.country === selectedCountry);
     if (selectedGenre !== 'all')   f = f.filter(m => m.genres.includes(selectedGenre));
@@ -170,7 +189,7 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
     const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
     const safePage   = Math.min(page, totalPages);
     const start      = (safePage - 1) * PER_PAGE;
-    return { filtered: f, total, totalPages, mangas: f.slice(start, start + PER_PAGE) };
+    return { total, totalPages, mangas: f.slice(start, start + PER_PAGE) };
   }, [initialMangas, page, query, selectedCountry, selectedGenre]);
 
   const banner = useMemo(() => initialMangas.slice(0, 5), [initialMangas]);
@@ -226,11 +245,11 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
               <X size={16} />
             </button>
             <div className="relative h-36 md:h-44 shrink-0 overflow-hidden bg-zinc-800">
-              <img src={p(mManga.cover)} className="w-full h-full object-cover blur-2xl scale-110 opacity-20 absolute inset-0" alt="" />
+              <Image src={optimizedSrc(mManga.cover)} alt="" fill sizes="100vw" className="object-cover blur-2xl scale-110 opacity-20" />
               <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#0d0d0d] to-transparent" />
-              <div className="absolute bottom-0 left-6 md:left-10 translate-y-1/2">
-                <div className="w-20 md:w-28 aspect-[2/3] rounded-xl shadow-2xl border-2 border-white dark:border-zinc-800 bg-zinc-800 overflow-hidden">
-                  <img src={p(mManga.cover)} className="w-full h-full object-cover" alt={mManga.title} />
+              <div className="absolute bottom-0 left-6 md:left-10 translate-y-1/2 z-10">
+                <div className="relative w-20 md:w-28 aspect-[2/3] rounded-xl shadow-2xl border-2 border-white dark:border-zinc-800 bg-zinc-800 overflow-hidden">
+                  <Image src={optimizedSrc(mManga.cover)} alt={mManga.title} fill sizes="112px" className="object-cover" />
                 </div>
               </div>
             </div>
@@ -388,7 +407,15 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
             </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 md:gap-4">
-              {mangas.map((m, i) => <MangaCard key={m.id} m={m} onOpen={openModal} />)}
+              {mangas.map((m, i) => (
+                <MangaCard
+                  key={m.id}
+                  m={m}
+                  onOpen={openModal}
+                  // ✅ 8 การ์ดแรกโหลดทันที (above the fold) ที่เหลือ lazy
+                  priority={i < 8}
+                />
+              ))}
             </div>
           )}
 
