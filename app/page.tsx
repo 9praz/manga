@@ -1,7 +1,7 @@
 // app/page.tsx — Server Component + Full SEO
 import type { Metadata } from 'next';
 import { createClient } from '@supabase/supabase-js';
-import MangaClient from '../../_components/MangaClient';
+import MangaClient from './_components/MangaClient';
 
 export const revalidate = 300;
 
