@@ -30,6 +30,8 @@ export interface Manga {
   cover: string;
   genres: string[];
   country: string;
+  view_count: number;
+  rating_avg: number;
 }
 interface Chapter { id: string; title: string; url: string; number: number; }
 
@@ -142,7 +144,7 @@ const MangaCard = memo(({ m, onOpen, priority }: { m: Manga, onOpen: (m: Manga) 
         <div className="absolute top-1.5 left-1.5 bg-black/60 backdrop-blur-sm px-1.5 py-0.5 rounded text-[8px] font-black text-white">{flag}</div>
       </div>
       <div className="mt-1.5">
-        <h3 className="text-[10px] font-bold leading-snug line-clamp-2 group-hover:text-blue-500 transition-colors">{m.title}</h3>
+        <h3 className="text-[10px] font-bold leading-snug line-clamp-2 group-hover:text-blue-500 transition-colors">{m.title}</h3>{m.rating_avg > 0 && (<div className="flex items-center gap-0.5 mt-0.5"><span className="text-yellow-400 text-[9px]">?</span><span className="text-[9px] font-bold text-zinc-400">{m.rating_avg.toFixed(1)}</span></div>)}
       </div>
     </div>
   );
@@ -442,3 +444,4 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
     </div>
   );
 }
+
