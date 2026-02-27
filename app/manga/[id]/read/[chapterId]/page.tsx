@@ -4,7 +4,7 @@ import type { Metadata } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import ReaderImages from './_components/ReaderImages';
+import ReaderImages from '../../../../_components/ReaderImages';
 
 // ✅ Cache reader 1 ชั่วโมง
 export const revalidate = 3600;
