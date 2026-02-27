@@ -13,11 +13,10 @@ const BROWSER_HEADERS = {
   'Sec-Fetch-Dest': 'image',
   'Sec-Fetch-Mode': 'no-cors',
   'Sec-Fetch-Site': 'same-site',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache',
+  // ✅ ลบ 'Cache-Control': 'no-cache' และ 'Pragma': 'no-cache' ออก
+  //    เพราะมันบอกให้ upstream ไม่ cache ทำให้ดึงใหม่ทุกครั้ง
 };
 
-// โดเมนที่โหลดไม่ได้ (Cloudflare strict / redirect loop)
 const BLOCKED_DOMAINS = ['webtoon168.com', 'imgez.org'];
 
 const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200" viewBox="0 0 800 1200">
@@ -48,7 +47,6 @@ export async function GET(request: NextRequest) {
     return new Response('Invalid URL', { status: 400 });
   }
 
-  // Blocked domains → placeholder ทันที
   if (BLOCKED_DOMAINS.some(d => parsedUrl.hostname.includes(d))) {
     return placeholderResponse();
   }
@@ -63,11 +61,12 @@ export async function GET(request: NextRequest) {
         'Origin':  referer.slice(0, -1),
         'Host':    parsedUrl.hostname,
       },
-      cache: 'no-store',
+      // ✅ เปลี่ยนจาก 'no-store' → 'force-cache'
+      //    Next.js / Vercel Edge จะ cache รูปไว้ ไม่ต้องดึงซ้ำทุกครั้ง
+      cache: 'force-cache',
       redirect: 'follow',
     });
 
-    // 403/401 → placeholder
     if (res.status === 403 || res.status === 401) {
       return placeholderResponse();
     }
@@ -78,7 +77,6 @@ export async function GET(request: NextRequest) {
 
     const contentType = res.headers.get('Content-Type') || 'image/jpeg';
 
-    // ได้ HTML กลับมา (error page) → placeholder
     if (
       contentType.includes('text/html') ||
       contentType.includes('application/json') ||
@@ -89,7 +87,9 @@ export async function GET(request: NextRequest) {
 
     const headers: Record<string, string> = {
       'Content-Type': contentType,
-      'Cache-Control': 'public, max-age=86400, stale-while-revalidate=3600',
+      // ✅ Cache 7 วัน + stale-while-revalidate 1 วัน
+      //    Browser และ Vercel Edge จะ serve จาก cache ทันที ไม่ต้องรอ fetch
+      'Cache-Control': 'public, max-age=604800, stale-while-revalidate=86400, immutable',
       'Access-Control-Allow-Origin': '*',
       'X-Proxy-By': 'manga-proxy',
     };
@@ -100,7 +100,6 @@ export async function GET(request: NextRequest) {
     return new Response(res.body, { status: 200, headers });
 
   } catch (err: unknown) {
-    // redirect loop หรือ network error → placeholder แทน 502
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('redirect') || msg.includes('fetch failed')) {
       return placeholderResponse();
