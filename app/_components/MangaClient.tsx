@@ -32,7 +32,6 @@ export interface Manga {
   country: string;
   view_count: number;
   rating_avg: number;
-  rating_count: number;
 }
 interface Chapter { id: string; title: string; url: string; number: number; }
 
@@ -67,7 +66,7 @@ const BannerSlider = memo(({ items, onOpen }: { items: Manga[], onOpen: (m: Mang
           <div
             key={i}
             className={`absolute inset-0 cursor-pointer transition-opacity duration-1000 ${i === cur ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}
-            onClick={() => onOpen(m)}
+            onClick={() => { window.location.href = `/manga/${encodeURIComponent(m.id)}`; }}
           >
             {/* ✅ priority=true บน banner แรก = preload ทันที */}
             <Image
@@ -120,7 +119,7 @@ BannerSlider.displayName = 'BannerSlider';
 
 // ─── MANGA CARD ───
 // ✅ next/image lazy load อัตโนมัติ + serve รูป resize แล้วจาก CDN
-const MangaCard = memo(({ m, onOpen, priority }: { m: Manga, onOpen: (m: Manga) => void, priority?: boolean }) => {
+const MangaCard = memo(({ m, priority }: { m: Manga, priority?: boolean }) => {
   const [err, setErr] = useState(false);
   const src = err
     ? `https://placehold.co/300x420/111827/3b82f6?text=${encodeURIComponent(m.title.slice(0, 12))}`
@@ -128,7 +127,7 @@ const MangaCard = memo(({ m, onOpen, priority }: { m: Manga, onOpen: (m: Manga) 
   const flag = COUNTRIES.find(c => c.key === m.country)?.flag || '🌏';
 
   return (
-    <div onClick={() => onOpen(m)} className="group cursor-pointer select-none">
+    <a href={`/manga/${encodeURIComponent(m.id)}`} className="group cursor-pointer select-none block">
       <div className="relative aspect-[2/3] rounded-xl overflow-hidden bg-zinc-800 transition-transform duration-300 group-hover:scale-95 ring-1 ring-transparent group-hover:ring-blue-500/40">
         <Image
           src={src}
@@ -145,14 +144,15 @@ const MangaCard = memo(({ m, onOpen, priority }: { m: Manga, onOpen: (m: Manga) 
         <div className="absolute top-1.5 left-1.5 bg-black/60 backdrop-blur-sm px-1.5 py-0.5 rounded text-[8px] font-black text-white">{flag}</div>
       </div>
       <div className="mt-1.5">
-        <h3 className="text-[10px] font-bold leading-snug line-clamp-2 group-hover:text-blue-500 transition-colors">{m.title}</h3>{m.rating_avg > 0 && (
+        <h3 className="text-[10px] font-bold leading-snug line-clamp-2 group-hover:text-blue-500 transition-colors">{m.title}</h3>
+        {(m.rating_avg ?? 0) > 0 && (
           <div className="flex items-center gap-0.5 mt-0.5">
             <span className="text-yellow-400 text-[9px]">&#9733;</span>
             <span className="text-[9px] font-bold text-zinc-400">{m.rating_avg.toFixed(1)}</span>
           </div>
         )}
       </div>
-    </div>
+    </a>
   );
 });
 MangaCard.displayName = 'MangaCard';
@@ -276,21 +276,6 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
                     {COUNTRIES.find(c => c.key === mManga.country)?.flag}{' '}
                     {COUNTRIES.find(c => c.key === mManga.country)?.label || mManga.country}
                   </p>
-                  <div className="flex items-center gap-3 flex-wrap mt-1">
-                    {(mManga.rating_avg ?? 0) > 0 && (
-                      <span className="flex items-center gap-1 text-[11px] font-bold text-yellow-400">
-                        <span>&#9733;</span>
-                        {(mManga.rating_avg ?? 0).toFixed(1)}
-                        <span className="text-zinc-500 font-normal">({mManga.rating_count ?? 0} คะแนน)</span>
-                      </span>
-                    )}
-                    {(mManga.view_count ?? 0) > 0 && (
-                      <span className="flex items-center gap-1 text-[11px] text-zinc-500">
-                        <span>&#128065;</span>
-                        {(mManga.view_count ?? 0).toLocaleString()} ครั้ง
-                      </span>
-                    )}
-                  </div>
                 </div>
                 <div className="w-full md:w-64 shrink-0">
                   {mLoading ? (
@@ -434,8 +419,6 @@ export default function MangaClient({ mangas: initialMangas }: { mangas: Manga[]
                 <MangaCard
                   key={m.id}
                   m={m}
-                  onOpen={openModal}
-                  // ✅ 8 การ์ดแรกโหลดทันที (above the fold) ที่เหลือ lazy
                   priority={i < 8}
                 />
               ))}
