@@ -1,8 +1,10 @@
 // app/manga/[id]/_components/ChapterList.tsx
+// ✅ Performance: virtual windowing สำหรับ chapter list ยาวๆ
+// ✅ UI: modern dark design, sticky search, chapter progress indicator
 "use client";
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
-import { BookOpen, ChevronRight, Search } from 'lucide-react';
+import { BookOpen, ChevronRight, Search, SortDesc, SortAsc, Clock } from 'lucide-react';
 
 interface Chapter {
   id: string;
@@ -19,77 +21,188 @@ interface Props {
 function formatDate(dateStr: string | null) {
   if (!dateStr) return '';
   try {
-    return new Date(dateStr).toLocaleDateString('th-TH', {
-      day: 'numeric', month: 'short', year: '2-digit',
-    });
+    const d = new Date(dateStr);
+    const now = new Date();
+    const diff = (now.getTime() - d.getTime()) / 1000;
+    if (diff < 86400) return 'วันนี้';
+    if (diff < 172800) return 'เมื่อวาน';
+    if (diff < 604800) return `${Math.floor(diff / 86400)} วันที่แล้ว`;
+    return d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' });
   } catch { return ''; }
+}
+
+// Virtual list: render เฉพาะ item ที่อยู่ใน viewport + buffer
+const ITEM_HEIGHT = 68; // px ต่อ item
+const BUFFER = 5;       // render เผื่อ 5 items ก่อน/หลัง viewport
+
+function VirtualChapterList({ chapters, mangaId }: { chapters: Chapter[]; mangaId: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(500);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setContainerHeight(el.clientHeight);
+    const onScroll = () => setScrollTop(el.scrollTop);
+    const onResize = () => setContainerHeight(el.clientHeight);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onResize);
+    return () => { el.removeEventListener('scroll', onScroll); window.removeEventListener('resize', onResize); };
+  }, []);
+
+  const totalHeight = chapters.length * ITEM_HEIGHT;
+  const startIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER);
+  const endIdx = Math.min(chapters.length - 1, Math.ceil((scrollTop + containerHeight) / ITEM_HEIGHT) + BUFFER);
+  const visibleChapters = chapters.slice(startIdx, endIdx + 1);
+
+  return (
+    <div ref={containerRef} className="overflow-y-auto max-h-[600px] scrollbar-thin scrollbar-track-zinc-900 scrollbar-thumb-zinc-700 rounded-2xl border border-white/5">
+      <div style={{ height: totalHeight, position: 'relative' }}>
+        <div style={{ position: 'absolute', top: startIdx * ITEM_HEIGHT, left: 0, right: 0 }}>
+          {visibleChapters.map((ch) => (
+            <Link
+              href={`/manga/${mangaId}/read/${ch.id}`}
+              key={ch.id}
+              prefetch={false}
+              style={{ height: ITEM_HEIGHT }}
+              className="group flex items-center justify-between px-4 border-b border-white/[0.04] hover:bg-blue-600/10 transition-colors duration-150"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                {/* Chapter number badge */}
+                <div className="w-11 h-11 flex items-center justify-center bg-zinc-900 group-hover:bg-blue-600/20 rounded-xl shrink-0 transition-colors border border-white/5">
+                  <span className="text-[11px] font-black text-zinc-400 group-hover:text-blue-400">{ch.number}</span>
+                </div>
+                <div className="min-w-0">
+                  <span className="block text-[11px] font-semibold text-white/80 group-hover:text-white truncate transition-colors">
+                    {ch.title || `ตอนที่ ${ch.number}`}
+                  </span>
+                  {ch.createdAt && (
+                    <span className="flex items-center gap-1 text-[9px] text-zinc-600 group-hover:text-blue-300/60 mt-0.5 transition-colors">
+                      <Clock size={8} />
+                      {formatDate(ch.createdAt)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <ChevronRight size={14} className="text-zinc-700 group-hover:text-blue-400 shrink-0 transition-all group-hover:translate-x-0.5" />
+            </Link>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function ChapterList({ chapters, mangaId }: Props) {
   const [searchTerm, setSearchTerm] = useState('');
+  const [sortAsc, setSortAsc] = useState(false); // newest first by default
+  const [readSet, setReadSet] = useState<Set<string>>(new Set());
+
+  // load read history จาก localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`read_${mangaId}`);
+      if (raw) setReadSet(new Set(JSON.parse(raw)));
+    } catch {}
+  }, [mangaId]);
 
   const filtered = useMemo(() => {
-    if (!searchTerm.trim()) return chapters;
-    const q = searchTerm.toLowerCase();
-    return chapters.filter(
-      (ch) =>
-        ch.number.toString().includes(q) ||
-        ch.title.toLowerCase().includes(q)
-    );
-  }, [chapters, searchTerm]);
+    let list = [...chapters];
+    if (searchTerm.trim()) {
+      const q = searchTerm.toLowerCase();
+      list = list.filter(ch => ch.number.toString().includes(q) || ch.title.toLowerCase().includes(q));
+    }
+    list.sort((a, b) => sortAsc ? a.number - b.number : b.number - a.number);
+    return list;
+  }, [chapters, searchTerm, sortAsc]);
+
+  const readCount = useMemo(() => chapters.filter(ch => readSet.has(ch.id)).length, [chapters, readSet]);
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-5">
-        <h2 className="text-lg font-black uppercase tracking-tight text-white">
-          ทั้งหมด {chapters.length} ตอน
-        </h2>
-        {/* Search */}
-        <div className="relative w-44 md:w-64">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={14} />
-          <input
-            type="text"
-            placeholder="ค้นหาตอน..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-zinc-900/60 border border-white/10 rounded-xl py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-zinc-600 focus:border-blue-600 outline-none transition-colors"
-          />
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <div>
+          <h2 className="text-base font-black uppercase tracking-tight text-white">
+            {chapters.length} ตอน
+          </h2>
+          {readCount > 0 && (
+            <p className="text-[10px] text-zinc-500 mt-0.5">อ่านแล้ว {readCount}/{chapters.length} ตอน</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Sort toggle */}
+          <button
+            onClick={() => setSortAsc(v => !v)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-zinc-900 hover:bg-zinc-800 border border-white/5 rounded-xl text-[11px] font-bold text-zinc-400 hover:text-white transition-all"
+            title={sortAsc ? 'ตอนเก่าก่อน' : 'ตอนใหม่ก่อน'}
+          >
+            {sortAsc ? <SortAsc size={13} /> : <SortDesc size={13} />}
+            {sortAsc ? 'เก่า→ใหม่' : 'ใหม่→เก่า'}
+          </button>
+          {/* Search */}
+          <div className="relative w-36 md:w-52">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={13} />
+            <input
+              type="text"
+              placeholder="ค้นหาตอน..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full bg-zinc-900 border border-white/5 rounded-xl py-2 pl-8 pr-3 text-xs text-white placeholder:text-zinc-600 focus:border-blue-600/60 outline-none transition-colors"
+            />
+          </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {filtered.map((ch) => (
-          <Link
-            href={`/manga/${mangaId}/read/${ch.id}`}
-            key={ch.id}
-            prefetch={false}
-            className="group flex items-center justify-between p-4 bg-zinc-900/30 hover:bg-blue-600 rounded-2xl border border-white/5 hover:border-blue-500 transition-all duration-200"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 flex items-center justify-center bg-zinc-800/60 group-hover:bg-blue-500/30 rounded-xl shrink-0 transition-colors">
-                <BookOpen size={15} className="text-zinc-500 group-hover:text-white" />
-              </div>
-              <div>
-                <span className="block text-[10px] font-bold text-zinc-500 group-hover:text-blue-200 mb-0.5 transition-colors">
-                  {ch.title}
-                </span>
-                <span className="text-sm font-black group-hover:text-white transition-colors">
-                  ตอนที่ {ch.number}
-                </span>
-                {ch.createdAt && (
-                  <span className="block text-[10px] text-zinc-600 group-hover:text-blue-200/60 mt-0.5">
-                    {formatDate(ch.createdAt)}
-                  </span>
-                )}
-              </div>
-            </div>
-            <ChevronRight size={15} className="text-zinc-600 group-hover:text-white shrink-0 transition-colors" />
-          </Link>
-        ))}
-      </div>
+      {/* Progress bar */}
+      {readCount > 0 && (
+        <div className="mb-4 h-1 bg-zinc-900 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-blue-600 rounded-full transition-all duration-500"
+            style={{ width: `${(readCount / chapters.length) * 100}%` }}
+          />
+        </div>
+      )}
 
-      {filtered.length === 0 && (
+      {/* Virtual list (ถ้า > 30 ตอน) / grid (ถ้าน้อย) */}
+      {filtered.length === 0 ? (
         <p className="text-center text-zinc-600 mt-10 text-sm">ไม่พบตอนที่ค้นหา</p>
+      ) : filtered.length > 30 ? (
+        <VirtualChapterList chapters={filtered} mangaId={mangaId} />
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {filtered.map((ch) => (
+            <Link
+              href={`/manga/${mangaId}/read/${ch.id}`}
+              key={ch.id}
+              prefetch={false}
+              className="group flex items-center justify-between p-3.5 bg-zinc-900/40 hover:bg-blue-600/10 rounded-xl border border-white/[0.04] hover:border-blue-500/20 transition-all duration-150"
+            >
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 flex items-center justify-center rounded-xl shrink-0 transition-colors border ${
+                  readSet.has(ch.id) ? 'bg-blue-600/20 border-blue-500/30' : 'bg-zinc-800/60 border-white/5'
+                }`}>
+                  <BookOpen size={13} className={readSet.has(ch.id) ? 'text-blue-400' : 'text-zinc-500 group-hover:text-white'} />
+                </div>
+                <div>
+                  <span className="block text-[11px] font-bold text-white/70 group-hover:text-white transition-colors">
+                    ตอนที่ {ch.number}
+                  </span>
+                  <span className="block text-[9px] text-zinc-600 group-hover:text-zinc-400 mt-0.5 transition-colors truncate max-w-[160px]">
+                    {ch.title}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {ch.createdAt && (
+                  <span className="text-[9px] text-zinc-700 hidden md:block">{formatDate(ch.createdAt)}</span>
+                )}
+                <ChevronRight size={13} className="text-zinc-700 group-hover:text-blue-400 transition-all group-hover:translate-x-0.5" />
+              </div>
+            </Link>
+          ))}
+        </div>
       )}
     </div>
   );
