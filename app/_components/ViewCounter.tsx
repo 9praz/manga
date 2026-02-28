@@ -36,13 +36,17 @@ export default function ViewCounter({ mangaTitle, initialCount }: Props) {
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, '1');
 
-    // fire-and-forget — ไม่ await ใน useEffect body
-    supabase
-      .rpc('increment_view_count', { manga_title_input: mangaTitle })
-      .then(({ data }) => {
+    // fire-and-forget — ใช้ async IIFE เพราะ Supabase rpc() return PromiseLike ไม่ใช่ Promise
+    void (async () => {
+      try {
+        const { data } = await supabase.rpc('increment_view_count', {
+          manga_title_input: mangaTitle,
+        });
         if (data?.view_count) setCount(data.view_count);
-      })
-      .catch(() => {/* silent fail */});
+      } catch {
+        /* silent fail */
+      }
+    })();
   }, [mangaTitle]);
 
   return (
