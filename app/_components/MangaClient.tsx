@@ -158,12 +158,6 @@ const BannerSlider = memo(function BannerSlider({
                     </span>
                   ))}
                 </div>
-                {/* ✅ Description */}
-                {m.desc && (
-                  <p className="text-zinc-400 text-[11px] leading-relaxed mb-2 line-clamp-2 max-w-md text-center md:text-left">
-                    {m.desc}
-                  </p>
-                )}
                 {/* ✅ Stats: views + rating */}
                 <div className="flex items-center gap-3 mb-3 justify-center md:justify-start text-zinc-400">
                   {(m.rating_avg ?? 0) > 0 && (
