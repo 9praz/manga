@@ -1,11 +1,10 @@
 // app/manga/[id]/page.tsx — Server Component + SEO
-// ⚡ OPTIMIZED v2:
-//   - unstable_cache: DB query ถูก cache ที่ Next.js layer → ไม่ต้องยิง Supabase ซ้ำ
-//   - generateMetadata ใช้ cache เดียวกับ page → 0 extra DB round-trips
-//   - revalidate = 600 (10 นาที) + tag-based revalidation รองรับ on-demand
-//   - Supabase client เป็น singleton (เหมือนเดิม)
+// ⚡ OPTIMIZED:
+//   - Parallel fetch ทั้ง chapters + mangaMeta พร้อมกัน (เหมือนเดิม ดีอยู่แล้ว)
+//   - select เฉพาะ columns ที่ต้องการ (ลด payload)
+//   - cover fallback chain ใช้ placehold แทน proxy เมื่อไม่มี URL จริง
+//   - เพิ่ม Cache-Control hint ผ่าน revalidate
 import type { Metadata } from 'next';
-import { unstable_cache } from 'next/cache';
 import { createClient } from '@supabase/supabase-js';
 import { ArrowLeft, Info } from 'lucide-react';
 import Link from 'next/link';
@@ -14,47 +13,15 @@ import ChapterList from '../../_components/ChapterList';
 import RatingWidget from '../../_components/RatingWidget';
 import ViewCounter from '../../_components/ViewCounter';
 
-// ✅ เพิ่มเป็น 10 นาที — หน้า manga detail ไม่ได้เปลี่ยนบ่อย
-export const revalidate = 600;
+// ISR 5 นาที — ลด cold fetch, ไม่ต้อง revalidate ทุก request
+export const revalidate = 300;
 
-// ✅ Singleton Supabase client
+// ✅ สร้าง client นอก function เพื่อ reuse connection pool
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-// ─── Cached DB fetch ──────────────────────────────────────────────────────────
-// unstable_cache จะ cache ผลลัพธ์ไว้ใน Next.js Data Cache
-// ทั้ง generateMetadata และ page function จะได้ผลเดียวกัน → ยิง DB แค่ครั้งเดียว
-const getMangaData = unstable_cache(
-  async (title: string) => {
-    const [{ data: chaptersData, error }, { data: mangaMeta }] =
-      await Promise.all([
-        supabase
-          .from('chapters')
-          .select('id, chapter_title, cover_url, created_at')
-          .eq('manga_title', title),
-        supabase
-          .from('mangas')
-          .select(
-            'title, cover_url, genres, country, view_count, rating_avg, rating_count'
-          )
-          .eq('title', title)
-          .single(),
-      ]);
-
-    return { chaptersData, error, mangaMeta };
-  },
-  // cache key prefix — title จะถูกต่อท้ายโดย Next.js อัตโนมัติ
-  ['manga-detail'],
-  {
-    revalidate: 600,
-    // tag-based revalidation: เรียก revalidateTag('manga-<title>') ได้เลย
-    tags: ['manga-detail'],
-  }
-);
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function extractChapterNum(title: string): number {
   if (!title) return 0;
   const ep = title.match(/ep\.?\s*0*(\d+)/i);
@@ -74,7 +41,6 @@ function proxyImage(url: string): string {
 }
 
 // ─── Dynamic SEO per manga ────────────────────────────────────────────────────
-// ✅ ใช้ getMangaData() เดียวกับ page → ไม่มี extra DB fetch อีกต่อไป
 export async function generateMetadata({
   params,
 }: {
@@ -83,12 +49,15 @@ export async function generateMetadata({
   const { id } = await params;
   const title = decodeURIComponent(id);
 
-  // ✅ cache hit — ถ้า page render ก่อน จะได้ข้อมูลจาก cache ทันที
-  const { mangaMeta } = await getMangaData(title);
+  const { data } = await supabase
+    .from('mangas')
+    .select('cover_url, genres, rating_avg')
+    .eq('title', title)
+    .single();
 
   const description = `อ่านมังงะ ${title} แปลไทย ครบทุกตอน อัปเดตใหม่ล่าสุด อ่านฟรีออนไลน์ ไม่ต้องสมัครสมาชิก`;
-  const coverUrl = mangaMeta?.cover_url?.trim()
-    ? `/api/proxy-image?url=${encodeURIComponent(mangaMeta.cover_url)}`
+  const coverUrl = data?.cover_url?.trim()
+    ? `/api/proxy-image?url=${encodeURIComponent(data.cover_url)}`
     : undefined;
 
   return {
@@ -102,7 +71,7 @@ export async function generateMetadata({
       'อ่านมังงะ',
       'มังงะแปลไทย',
       'manga thai',
-      ...(Array.isArray(mangaMeta?.genres) ? mangaMeta.genres : []),
+      ...(Array.isArray(data?.genres) ? data.genres : []),
     ],
     openGraph: {
       title: `อ่าน ${title} | มังงะแปลไทย`,
@@ -135,8 +104,22 @@ export default async function MangaDetailPage({
   const { id } = await params;
   const decodedId = decodeURIComponent(id);
 
-  // ✅ cache hit — same key as generateMetadata → 0 extra DB round-trips
-  const { chaptersData, error, mangaMeta } = await getMangaData(decodedId);
+  // ✅ Parallel fetch — ทั้งคู่ยิงพร้อมกัน
+  const [{ data: chaptersData, error }, { data: mangaMeta }] =
+    await Promise.all([
+      supabase
+        .from('chapters')
+        // ✅ select เฉพาะ columns ที่ใช้จริง (ลด payload จาก DB)
+        .select('id, chapter_title, cover_url, created_at')
+        .eq('manga_title', decodedId),
+      supabase
+        .from('mangas')
+        .select(
+          'title, cover_url, genres, country, view_count, rating_avg, rating_count'
+        )
+        .eq('title', decodedId)
+        .single(),
+    ]);
 
   if (error || !chaptersData || chaptersData.length === 0) notFound();
 
@@ -199,12 +182,16 @@ export default async function MangaDetailPage({
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
 
+      {/* หน้านี้ force dark เสมอ — manga detail เป็น dark-only design */}
       <div className="min-h-screen bg-[#050505] text-white selection:bg-blue-600/30" style={{ colorScheme: 'dark' }}>
 
         {/* Hero blur banner */}
         <div className="relative h-[56vh] w-full overflow-hidden bg-[#050505]">
+          {/* ✅ gradient 3 layer: ซ้อนกันเพื่อกำจัด hard edge ที่เห็นเป็นเส้นขาวบน mobile */}
           <div className="absolute inset-0 z-10 pointer-events-none">
+            {/* layer 1: bottom → up ทึบ */}
             <div className="absolute inset-0 bg-gradient-to-t from-[#050505] via-[#050505]/90 to-transparent" />
+            {/* layer 2: top → down ทึบ (กั้นรูปด้านบนไม่ให้โผล่) */}
             <div className="absolute inset-0 bg-gradient-to-b from-[#050505]/60 to-transparent" />
           </div>
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -213,6 +200,7 @@ export default async function MangaDetailPage({
             className="w-full h-full object-cover opacity-30 blur-3xl scale-110"
             alt=""
             aria-hidden="true"
+            // banner ไม่ต้อง high priority — ไม่กระทบ LCP
             loading="lazy"
           />
           <Link
@@ -238,6 +226,7 @@ export default async function MangaDetailPage({
                 alt={`ปกมังงะ ${decodedId}`}
                 width={256}
                 height={341}
+                // ✅ fetchpriority high — นี่คือ LCP element
                 fetchPriority="high"
                 className="w-44 md:w-64 rounded-[1.8rem] shadow-[0_24px_64px_rgba(0,0,0,0.65)] border border-white/10 object-cover object-top aspect-[3/4]"
                 style={{ display: 'block' }}
