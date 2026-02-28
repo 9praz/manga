@@ -46,8 +46,7 @@ const supabase = createClient(
 export default async function HomePage() {
   const { data, error } = await supabase
     .from('mangas')
-    // ✅ เพิ่ม description สำหรับ banner
-    .select('title, cover_url, description, genres, country, view_count, rating_avg, rating_count')
+    .select('title, cover_url, genres, country, view_count, rating_avg, rating_count')
     .order('title', { ascending: true });
 
   if (error || !data) {
@@ -72,8 +71,6 @@ export default async function HomePage() {
       : `https://placehold.co/400x600/1f2937/3b82f6?text=${encodeURIComponent(
           (row.title as string).slice(0, 15)
         )}`,
-    // ✅ ส่ง description มาให้ banner ใช้
-    desc:         (row.description as string) || '',
     genres:       Array.isArray(row.genres) ? [...new Set(row.genres as string[])] : [],
     country:      (row.country as string) || 'japan',
     view_count:   (row.view_count as number) ?? 0,
