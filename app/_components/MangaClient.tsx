@@ -540,7 +540,7 @@ export default function MangaClient({
       <header className="sticky top-0 z-50 px-4 md:px-6 py-3 bg-white/90 dark:bg-[#0a0a0a]/90 backdrop-blur-xl border-b border-zinc-100 dark:border-zinc-900">
         <div className="max-w-7xl mx-auto flex items-center gap-3">
           <h1 className="text-lg font-black italic text-blue-600 tracking-tight uppercase shrink-0">
-            MANGA.BLUE
+            MANGA.COM
           </h1>
           <div className="flex-1 max-w-sm flex items-center gap-2 bg-zinc-100 dark:bg-zinc-900 px-3.5 py-2 rounded-xl border border-transparent focus-within:border-blue-500/40 transition-colors">
             <SearchIcon size={14} className="text-zinc-400 shrink-0 pointer-events-none" />
