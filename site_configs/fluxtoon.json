@@ -1,0 +1,15 @@
+{
+  "_saved": "2026-02-28T03:59:43.188365",
+  "url": "https://www.fluxtoon.com",
+  "tech": [
+    "Omise(TH)"
+  ],
+  "source": "html",
+  "api_url": null,
+  "method": "GET",
+  "field_map": {},
+  "pag": {
+    "type": "page",
+    "param": "page"
+  }
+}
