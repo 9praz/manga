@@ -46,7 +46,7 @@ const supabase = createClient(
 export default async function HomePage() {
   const { data, error } = await supabase
     .from('mangas')
-    .select('title, cover_url, genres, country, view_count, rating_avg, rating_count')
+    .select('title, cover_url, description, genres, country, view_count, rating_avg, rating_count')
     .order('title', { ascending: true });
 
   if (error || !data) {
@@ -73,6 +73,7 @@ export default async function HomePage() {
         )}`,
     genres:       Array.isArray(row.genres) ? [...new Set(row.genres as string[])] : [],
     country:      (row.country as string) || 'japan',
+    desc:         (row.description as string) || '',
     view_count:   (row.view_count as number) ?? 0,
     rating_avg:   (row.rating_avg as number) ?? 0,
     rating_count: (row.rating_count as number) ?? 0,
