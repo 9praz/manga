@@ -158,6 +158,12 @@ const BannerSlider = memo(function BannerSlider({
                     </span>
                   ))}
                 </div>
+                {/* ✅ Description */}
+                {m.desc && (
+                  <p className="text-zinc-400 text-[11px] leading-relaxed mb-2 line-clamp-2 max-w-md text-center md:text-left">
+                    {m.desc}
+                  </p>
+                )}
                 {/* ✅ Stats: views + rating */}
                 <div className="flex items-center gap-3 mb-3 justify-center md:justify-start text-zinc-400">
                   {(m.rating_avg ?? 0) > 0 && (
@@ -168,7 +174,9 @@ const BannerSlider = memo(function BannerSlider({
                   )}
                   {(m.view_count ?? 0) > 0 && (
                     <span className="text-[10px]">
-                      👁 {m.view_count >= 1000
+                      👁 {m.view_count >= 1_000_000
+                        ? `${(m.view_count / 1_000_000).toFixed(1)}M`
+                        : m.view_count >= 1000
                         ? `${(m.view_count / 1000).toFixed(1)}K`
                         : m.view_count} ครั้ง
                     </span>
@@ -380,7 +388,7 @@ export default function MangaClient({
   const goPage = useCallback(
     (p: number) => {
       setPage(p);
-      listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      listRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' });
     },
     []
   );
