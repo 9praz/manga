@@ -233,14 +233,29 @@ const MangaCard = memo(function MangaCard({
         <h3 className="text-[10px] font-bold leading-snug line-clamp-2 group-hover:text-blue-500 transition-colors">
           {m.title}
         </h3>
-        {(m.rating_avg ?? 0) > 0 && (
-          <div className="flex items-center gap-0.5 mt-0.5">
-            <span className="text-yellow-400 text-[9px]">&#9733;</span>
-            <span className="text-[9px] font-bold text-zinc-400">
-              {m.rating_avg.toFixed(1)}
+        {/* ✅ rating + view count แถวเดียวกัน */}
+        <div className="flex items-center gap-2 mt-0.5">
+          {(m.rating_avg ?? 0) > 0 && (
+            <span className="flex items-center gap-0.5">
+              <span className="text-yellow-400 text-[9px]">★</span>
+              <span className="text-[9px] font-bold text-zinc-400">
+                {m.rating_avg.toFixed(1)}
+              </span>
             </span>
-          </div>
-        )}
+          )}
+          {(m.view_count ?? 0) > 0 && (
+            <span className="flex items-center gap-0.5">
+              <span className="text-[8px] text-zinc-600">👁</span>
+              <span className="text-[9px] text-zinc-500">
+                {m.view_count >= 1_000_000
+                  ? `${(m.view_count / 1_000_000).toFixed(1)}M`
+                  : m.view_count >= 1_000
+                  ? `${(m.view_count / 1_000).toFixed(1)}K`
+                  : m.view_count}
+              </span>
+            </span>
+          )}
+        </div>
       </div>
     </a>
   );
