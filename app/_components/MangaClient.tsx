@@ -67,7 +67,6 @@ const BannerSlider = memo(function BannerSlider({
 }) {
   const [cur, setCur] = useState(0);
 
-  // ✅ interval ใช้ useRef เก็บ id — ไม่ต้อง re-register effect เมื่อ cur เปลี่ยน
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const startTimer = useCallback(() => {
@@ -77,7 +76,6 @@ const BannerSlider = memo(function BannerSlider({
     }, 7000);
   }, [items.length]);
 
-  // เริ่ม timer เมื่อ mount
   React.useEffect(() => {
     if (!items.length) return;
     startTimer();
@@ -88,19 +86,19 @@ const BannerSlider = memo(function BannerSlider({
 
   const goTo = useCallback((i: number) => {
     setCur(i);
-    startTimer(); // reset timer เมื่อ user กด manual
+    startTimer();
   }, [startTimer]);
 
   if (!items.length) return null;
 
   return (
     <section className="px-4 md:px-6 max-w-7xl mx-auto">
-      <div className="relative h-[300px] md:h-[400px] rounded-[2rem] overflow-hidden bg-zinc-900">
+      {/* ✅ mobile สูงขึ้น (360px) เพื่อให้แสดงปก + ข้อความได้ */}
+      <div className="relative h-[360px] md:h-[420px] rounded-[2rem] overflow-hidden bg-zinc-900">
         {items.map((m, i) => (
           <a
             key={m.id}
             href={`/manga/${encodeURIComponent(m.id)}`}
-            // ✅ CSS opacity transition — smoother กว่า className swap
             className="absolute inset-0 transition-opacity duration-700"
             style={{
               opacity: i === cur ? 1 : 0,
@@ -108,48 +106,75 @@ const BannerSlider = memo(function BannerSlider({
               zIndex: i === cur ? 10 : 0,
             }}
           >
+            {/* Background blur */}
             <Image
               src={m.cover}
               alt=""
               fill
               sizes="100vw"
-              className="object-cover scale-110 blur-2xl opacity-25"
-              // ✅ priority เฉพาะ slide แรก
+              className="object-cover scale-110 blur-2xl opacity-30"
               priority={i === 0}
               aria-hidden
             />
-            <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/60 to-transparent" />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
-            <div className="relative z-10 h-full flex items-end md:items-center px-8 md:px-12 pb-8 md:pb-0 gap-7">
-              <div className="hidden md:block relative h-48 w-32 rounded-xl shadow-2xl border border-white/10 shrink-0 bg-zinc-800 overflow-hidden">
+            {/* Gradient overlay */}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/50 to-black/10" />
+            <div className="absolute inset-0 bg-gradient-to-r from-black/60 to-transparent md:block hidden" />
+
+            {/* ✅ Content: mobile = cover + teks ซ้อนกัน, desktop = side by side */}
+            <div className="relative z-10 h-full flex flex-col md:flex-row md:items-center px-5 md:px-12 pb-5 md:pb-0 gap-4 md:gap-7 justify-end md:justify-start">
+
+              {/* ✅ Cover — โชว์ทั้ง mobile และ desktop */}
+              <div className="relative shrink-0 mx-auto md:mx-0
+                              w-[100px] h-[133px] md:w-[140px] md:h-[187px]
+                              rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.8)]
+                              border border-white/15 overflow-hidden bg-zinc-800">
                 <Image
                   src={m.cover}
                   alt={m.title}
                   fill
-                  sizes="128px"
-                  className="object-cover"
+                  sizes="(max-width: 768px) 100px, 140px"
+                  className="object-cover object-top"
                   priority={i === 0}
                 />
               </div>
-              <div className="text-white flex-1">
-                <p className="text-blue-400 text-[9px] font-black uppercase tracking-[0.3em] mb-1.5">
+
+              {/* Text */}
+              <div className="text-white flex-1 text-center md:text-left">
+                <p className="text-blue-400 text-[9px] font-black uppercase tracking-[0.3em] mb-1">
                   มังงะแนะนำ
                 </p>
-                <h2 className="text-2xl md:text-3xl font-black mb-2.5 leading-tight line-clamp-2">
+                <h2 className="text-lg md:text-3xl font-black mb-1.5 leading-tight line-clamp-2">
                   {m.title}
                 </h2>
-                <div className="flex flex-wrap gap-1.5 mb-3">
+                {/* ✅ Genres */}
+                <div className="flex flex-wrap gap-1 mb-2 justify-center md:justify-start">
                   {m.genres.slice(0, 3).map((g) => (
                     <span
                       key={g}
-                      className="bg-white/10 border border-white/10 px-2.5 py-1 rounded-full text-[9px] font-bold text-zinc-300"
+                      className="bg-white/10 border border-white/10 px-2 py-0.5 rounded-full text-[8px] font-bold text-zinc-300"
                     >
                       {g}
                     </span>
                   ))}
                 </div>
-                <span className="inline-flex items-center gap-2 bg-white text-black px-7 py-2.5 rounded-full text-[11px] font-black uppercase hover:bg-blue-600 hover:text-white transition-colors">
-                  อ่านตอนนี้ <ChevronRight size={12} />
+                {/* ✅ Stats: views + rating */}
+                <div className="flex items-center gap-3 mb-3 justify-center md:justify-start text-zinc-400">
+                  {(m.rating_avg ?? 0) > 0 && (
+                    <span className="flex items-center gap-1 text-[10px] font-bold">
+                      <span className="text-yellow-400">★</span>
+                      {m.rating_avg.toFixed(1)}
+                    </span>
+                  )}
+                  {(m.view_count ?? 0) > 0 && (
+                    <span className="text-[10px]">
+                      👁 {m.view_count >= 1000
+                        ? `${(m.view_count / 1000).toFixed(1)}K`
+                        : m.view_count} ครั้ง
+                    </span>
+                  )}
+                </div>
+                <span className="inline-flex items-center gap-2 bg-white text-black px-5 py-2 rounded-full text-[11px] font-black uppercase hover:bg-blue-600 hover:text-white transition-colors">
+                  อ่านตอนนี้ <ChevronRight size={11} />
                 </span>
               </div>
             </div>
@@ -157,7 +182,7 @@ const BannerSlider = memo(function BannerSlider({
         ))}
 
         {/* Dots */}
-        <div className="absolute bottom-3 right-5 flex gap-1.5 z-20">
+        <div className="absolute bottom-3 right-4 flex gap-1.5 z-20">
           {items.map((_, i) => (
             <button
               key={i}
@@ -381,6 +406,7 @@ export default function MangaClient({
                 sizes="100vw"
                 className="object-cover blur-2xl scale-110 opacity-20"
               />
+              {/* ✅ ใช้ Tailwind dark: variant — sync กับ theme toggle */}
               <div className="absolute inset-0 bg-gradient-to-t from-white dark:from-[#0d0d0d] to-transparent" />
               <div className="absolute bottom-0 left-6 md:left-10 translate-y-1/2 z-10">
                 <div className="relative w-20 md:w-28 aspect-[2/3] rounded-xl shadow-2xl border-2 border-white dark:border-zinc-800 bg-zinc-800 overflow-hidden">
