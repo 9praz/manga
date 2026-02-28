@@ -35,6 +35,7 @@ export interface Manga {
   cover: string;
   genres: string[];
   country: string;
+  desc?: string;
   view_count: number;
   rating_avg: number;
   rating_count: number;
@@ -173,6 +174,12 @@ const BannerSlider = memo(function BannerSlider({
                     </span>
                   )}
                 </div>
+                {/* ✅ Description */}
+                {m.desc && (
+                  <p className="text-zinc-400 text-[11px] leading-relaxed mb-3 line-clamp-2 max-w-md mx-auto md:mx-0">
+                    {m.desc}
+                  </p>
+                )}
                 <span className="inline-flex items-center gap-2 bg-white text-black px-5 py-2 rounded-full text-[11px] font-black uppercase hover:bg-blue-600 hover:text-white transition-colors">
                   อ่านตอนนี้ <ChevronRight size={11} />
                 </span>
